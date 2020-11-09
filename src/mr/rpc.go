@@ -24,6 +24,29 @@ type ExampleReply struct {
 
 // Add your RPC definitions here.
 
+type EmptyArg struct{
+}
+
+type StringReply struct {
+	content string
+}
+
+type MapTask struct{
+	Taskid int
+	R int//the num of reduce task
+	File string//the file map task need to calculate
+}
+
+type ReduceTask struct{
+	Taskid int
+	MaxMapTaskId int//the max value of task id of map
+}
+
+type TaskLocator struct {
+	Taskid int 
+	TaskType string//the type of task,"map" or "reduce"
+}
+
 
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the master.

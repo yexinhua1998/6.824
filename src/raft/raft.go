@@ -1,5 +1,15 @@
 package raft
 
+//SINWARD'S LOG:
+//To install vscode go env,we let go module on by shell command below:
+//go env -w GO111MODULE=on
+//
+//but if you run shell 'go test -run 2A' which is the command to test your code
+//you will cannot run test,which is a fucking thing.
+//you should unset the go module feature by run shell 'go env -u GO111MODULE'
+
+//2020-11-10 TODO:fix the compiling error.let the 'go test -run 2A' show the test result.
+
 //
 // this is an outline of the API that raft must expose to
 // the service (or tester). see comments below for
@@ -17,14 +27,17 @@ package raft
 //   in the same server.
 //
 
-import "sync"
-import "sync/atomic"
-import "../labrpc"
+import (
+	"math/rand"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"../labrpc"
+)
 
 // import "bytes"
 // import "../labgob"
-
-
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -57,6 +70,10 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
+	term               int32
+	role               int32 //0-follower 1-candidate 2-leader
+	votedFor           int   //last roted for someone.-1 means none of candidate has been voted
+	heartBeatTimeOutMs int64 //the time of peer become candidate if there is no heart beat received
 }
 
 // return currentTerm and whether this server
@@ -66,6 +83,12 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here (2A).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	term = rf.term
+	isleader = rf.role == 2 //is leader
+
 	return term, isleader
 }
 
@@ -84,7 +107,6 @@ func (rf *Raft) persist() {
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
 }
-
 
 //
 // restore previously persisted state.
@@ -108,15 +130,14 @@ func (rf *Raft) readPersist(data []byte) {
 	// }
 }
 
-
-
-
 //
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
+	CandidateTerm int //candidate's term
+	CandidateId   int
 }
 
 //
@@ -125,6 +146,8 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
+	FollowerTerm int  //Follower's term
+	VoteGranted  bool //is vote granted
 }
 
 //
@@ -132,7 +155,53 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+
+	reply.FollowerTerm = rf.term
+	reply.VoteGranted = false
+	if rf.role == 0 && args.CandidateTerm > rf.term && (rf.votedFor == -1 || rf.votedFor == args.CandidateId) {
+		rf.votedFor = args.CandidateId
+		reply.VoteGranted = true
+	}
 }
+
+//-----------------implement AppendEntries Service--------------------
+
+type AppendEntriesReq struct {
+	LeaderId int
+	Term     int
+}
+
+type AppendEntriesRsp struct {
+}
+
+//2A: implements heartbeats only
+
+func (rf *Raft) AppendEntries(req *AppendEntriesReq, rsp *AppendEntriesRsp) {
+	rf.mu.Lock()
+	role := rf.role
+	rf.mu.Unlock()
+	if role == 0 { //follower
+		heartBeatTimeOutMs := atomic.LoadInt64(rf.heartBeatTimeOutMs)
+		upBound := 500
+		lowBound := 300
+		nowMs := time.Now().UnixNano() / 1000000
+		timeOutMs := nowMs + (((rand.Intn(1000) * (upBound - lowBound)) / 1000) + lowBound)
+		if timeOutMs > heartBeatTimeOutMs {
+			atomic.StoreInt64(rf.heartBeatTimeOutMs, heartBeatTimeOutMs)
+		}
+	} else if role == 2 { //leader
+		term := atomic.LoadInt32(rf.term)
+		if term < req.Term {
+			rf.mu.Lock()
+			rf.role = 0 //follower
+			rf.term = req.Term
+			rf.mu.Unlock()
+		}
+	}
+
+}
+
+//--------------------------------------------------------------------
 
 //
 // example code to send a RequestVote RPC to a server.
@@ -168,6 +237,10 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
+func (rf *Raft) sendAppendEntries(server int, req *AppendEntriesReq, rsp *AppendEntriesRsp) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", req, rsp)
+	return ok
+}
 
 //
 // the service using Raft (e.g. a k/v server) wants to start
@@ -189,7 +262,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
-
 
 	return index, term, isLeader
 }
@@ -234,10 +306,61 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
+	go rf.HeartBeatSender(100)
+	go rf.BecomeCandidateChecker(100)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
-
 	return rf
+}
+
+//sending heartbeat to every server
+func (rf *Raft) HeartBeatSender(interval_ms int) {
+	for {
+
+		role := atomic.LoadInt32(&rf.role)
+		if role == 2 {
+
+			peers := make([]*labrpc.ClientEnd, len(rf.peers))
+			rf.mu.Lock()
+			copy(peers, rf.peers)
+			rf.mu.Unlock()
+			for serverId, _ := range peers {
+				if serverId != rf.me {
+					var rsp AppendEntriesRsp
+					go rf.sendAppendEntries(serverId, &AppendEntriesReq{rf.me, rf.term}, &rsp)
+				}
+			}
+
+		}
+
+		time.Sleep(time.Duration(interval_ms) * time.Millisecond)
+	}
+}
+
+//checking is time to becom candidate
+func (rf *Raft) BecomeCandidateChecker(interval_ms int) {
+	for {
+
+		role := atomic.LoadInt32(&rf.role)
+		if role == 0 { //follower
+			nowMs := time.Now().UnixNano() / 1000000
+			timeOutMs := atomic.LoadInt64(&rf.heartBeatTimeOutMs)
+			if nowMs >= timeOutMs {
+				//temporary
+				//2A: become leader
+				rf.BecomeLeader()
+			}
+		}
+
+		time.Sleep(time.Duration(interval_ms) * time.Millisecond)
+	}
+}
+
+func (rf *Raft) BecomeLeader() {
+	rf.mu.Lock()
+	rf.role = 2 //leader
+	rf.term = rf.term + 1
+	rf.mu.Unlock()
 }
