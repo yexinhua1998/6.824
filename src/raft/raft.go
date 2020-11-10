@@ -86,7 +86,7 @@ func (rf *Raft) GetState() (int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	term = rf.term
+	term = int(rf.term)
 	isleader = rf.role == 2 //is leader
 
 	return term, isleader
@@ -156,9 +156,9 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 
-	reply.FollowerTerm = rf.term
+	reply.FollowerTerm = int(rf.term)
 	reply.VoteGranted = false
-	if rf.role == 0 && args.CandidateTerm > rf.term && (rf.votedFor == -1 || rf.votedFor == args.CandidateId) {
+	if rf.role == 0 && args.CandidateTerm > int(rf.term) && (rf.votedFor == -1 || rf.votedFor == args.CandidateId) {
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
 	}
@@ -181,20 +181,20 @@ func (rf *Raft) AppendEntries(req *AppendEntriesReq, rsp *AppendEntriesRsp) {
 	role := rf.role
 	rf.mu.Unlock()
 	if role == 0 { //follower
-		heartBeatTimeOutMs := atomic.LoadInt64(rf.heartBeatTimeOutMs)
+		heartBeatTimeOutMs := atomic.LoadInt64(&rf.heartBeatTimeOutMs)
 		upBound := 500
 		lowBound := 300
-		nowMs := time.Now().UnixNano() / 1000000
+		nowMs := int(time.Now().UnixNano() / 1000000)
 		timeOutMs := nowMs + (((rand.Intn(1000) * (upBound - lowBound)) / 1000) + lowBound)
-		if timeOutMs > heartBeatTimeOutMs {
-			atomic.StoreInt64(rf.heartBeatTimeOutMs, heartBeatTimeOutMs)
+		if timeOutMs > int(heartBeatTimeOutMs) {
+			atomic.StoreInt64(&rf.heartBeatTimeOutMs, heartBeatTimeOutMs)
 		}
 	} else if role == 2 { //leader
-		term := atomic.LoadInt32(rf.term)
-		if term < req.Term {
+		term := atomic.LoadInt32(&rf.term)
+		if int(term) < req.Term {
 			rf.mu.Lock()
 			rf.role = 0 //follower
-			rf.term = req.Term
+			rf.term = int32(req.Term)
 			rf.mu.Unlock()
 		}
 	}
@@ -329,7 +329,7 @@ func (rf *Raft) HeartBeatSender(interval_ms int) {
 			for serverId, _ := range peers {
 				if serverId != rf.me {
 					var rsp AppendEntriesRsp
-					go rf.sendAppendEntries(serverId, &AppendEntriesReq{rf.me, rf.term}, &rsp)
+					go rf.sendAppendEntries(serverId, &AppendEntriesReq{rf.me, int(rf.term)}, &rsp)
 				}
 			}
 
