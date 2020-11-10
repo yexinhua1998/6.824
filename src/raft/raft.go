@@ -9,6 +9,8 @@ package raft
 //you should unset the go module feature by run shell 'go env -u GO111MODULE'
 
 //2020-11-10 TODO:fix the compiling error.let the 'go test -run 2A' show the test result.
+//2020-11-11 00:17 DONE: fix the bug of many of peers claim to be leader
+//				   TODO: fix the bug of there are leaders while expected no leader
 
 //
 // this is an outline of the API that raft must expose to
@@ -32,7 +34,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
+	"fmt"
 	"../labrpc"
 )
 
@@ -180,17 +182,16 @@ func (rf *Raft) AppendEntries(req *AppendEntriesReq, rsp *AppendEntriesRsp) {
 	rf.mu.Lock()
 	role := rf.role
 	rf.mu.Unlock()
+	fmt.Printf("AppendEntries:role=%d,id=%d\n",role,rf.me)
+	term := atomic.LoadInt32(&rf.term)
 	if role == 0 { //follower
-		heartBeatTimeOutMs := atomic.LoadInt64(&rf.heartBeatTimeOutMs)
-		upBound := 500
-		lowBound := 300
-		nowMs := int(time.Now().UnixNano() / 1000000)
-		timeOutMs := nowMs + (((rand.Intn(1000) * (upBound - lowBound)) / 1000) + lowBound)
-		if timeOutMs > int(heartBeatTimeOutMs) {
-			atomic.StoreInt64(&rf.heartBeatTimeOutMs, heartBeatTimeOutMs)
+		rf.ModifyHeartBeatTimeOut()
+		if int(term) < req.Term {
+			rf.mu.Lock()
+			rf.term = int32(req.Term)
+			rf.mu.Unlock()
 		}
 	} else if role == 2 { //leader
-		term := atomic.LoadInt32(&rf.term)
 		if int(term) < req.Term {
 			rf.mu.Lock()
 			rf.role = 0 //follower
@@ -306,8 +307,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
+	rf.role=0
+	rf.ModifyHeartBeatTimeOut()
 	go rf.HeartBeatSender(100)
-	go rf.BecomeCandidateChecker(100)
+	go rf.BecomeCandidateChecker(50)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -315,23 +318,28 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	return rf
 }
 
+func (rf *Raft) BroadcastHeartBeat(){
+	peers := make([]*labrpc.ClientEnd, len(rf.peers))
+	rf.mu.Lock()
+	copy(peers, rf.peers)
+	rf.mu.Unlock()
+	for serverId, _ := range peers {
+		if serverId != rf.me {
+			var rsp AppendEntriesRsp
+			go rf.sendAppendEntries(serverId, &AppendEntriesReq{rf.me, int(rf.term)}, &rsp)
+		}
+	}
+}
+
 //sending heartbeat to every server
 func (rf *Raft) HeartBeatSender(interval_ms int) {
 	for {
 
 		role := atomic.LoadInt32(&rf.role)
+		fmt.Printf("triger heart beat sender.role=%d,id=%d,term=%d\n",role,rf.me,rf.term)
 		if role == 2 {
 
-			peers := make([]*labrpc.ClientEnd, len(rf.peers))
-			rf.mu.Lock()
-			copy(peers, rf.peers)
-			rf.mu.Unlock()
-			for serverId, _ := range peers {
-				if serverId != rf.me {
-					var rsp AppendEntriesRsp
-					go rf.sendAppendEntries(serverId, &AppendEntriesReq{rf.me, int(rf.term)}, &rsp)
-				}
-			}
+			rf.BroadcastHeartBeat()
 
 		}
 
@@ -350,7 +358,9 @@ func (rf *Raft) BecomeCandidateChecker(interval_ms int) {
 			if nowMs >= timeOutMs {
 				//temporary
 				//2A: become leader
+				fmt.Printf("me=%d role=%d now=%d timeout=%d become leader\n",rf.me,rf.role,nowMs,timeOutMs)
 				rf.BecomeLeader()
+				rf.BroadcastHeartBeat()
 			}
 		}
 
@@ -363,4 +373,18 @@ func (rf *Raft) BecomeLeader() {
 	rf.role = 2 //leader
 	rf.term = rf.term + 1
 	rf.mu.Unlock()
+}
+
+
+func (rf *Raft) ModifyHeartBeatTimeOut(){
+	heartBeatTimeOutMs := atomic.LoadInt64(&rf.heartBeatTimeOutMs)
+	upBound := 800
+	lowBound := 300
+	nowMs := int(time.Now().UnixNano() / 1000000)
+	timeOutMs := nowMs + (((rand.Intn(1000) * (upBound - lowBound)) / 1000) + lowBound)
+	fmt.Printf("+ModifyHeartBeatTimeOut:role=%d,id=%d,oldtimeout=%d,newtimeout=%d\n",rf.role,rf.me,heartBeatTimeOutMs,timeOutMs)
+	if timeOutMs > int(heartBeatTimeOutMs) {
+		atomic.StoreInt64(&rf.heartBeatTimeOutMs,int64(timeOutMs))
+	}
+	fmt.Printf("-ModifyHeartBeatTimeOut:role=%d,id=%d,timeout=%d\n",rf.role,rf.me,rf.heartBeatTimeOutMs)
 }
