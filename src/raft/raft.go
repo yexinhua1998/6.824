@@ -8,9 +8,12 @@ package raft
 //you will cannot run test,which is a fucking thing.
 //you should unset the go module feature by run shell 'go env -u GO111MODULE'
 
+//LOG HERE:
 //2020-11-10 TODO:fix the compiling error.let the 'go test -run 2A' show the test result.
 //2020-11-11 00:17 DONE: fix the bug of many of peers claim to be leader
 //				   TODO: fix the bug of there are leaders while expected no leader
+//2020-11-12 20:40 DONE: 在candidate状态下，群发requestsVote，并且根据响应是否成为leader逻辑
+//				   TODO: 完成candidate在一定时间内没有成为leader，会重新发起一次选举逻辑
 
 //
 // this is an outline of the API that raft must expose to
@@ -164,6 +167,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
 	}
+	fmt.Printf("RequestVote,id=%d,role=%d,req=%v,rsp=%v\n",rf.me,rf.role,args,reply)
 }
 
 //-----------------implement AppendEntries Service--------------------
@@ -310,7 +314,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.role=0
 	rf.ModifyHeartBeatTimeOut()
 	go rf.HeartBeatSender(100)
-	go rf.BecomeCandidateChecker(50)
+	go rf.BecomeCandidateChecker(20)
+	go rf.BecomeLeaderChecker(20)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -358,14 +363,67 @@ func (rf *Raft) BecomeCandidateChecker(interval_ms int) {
 			if nowMs >= timeOutMs {
 				//temporary
 				//2A: become leader
-				fmt.Printf("me=%d role=%d now=%d timeout=%d become leader\n",rf.me,rf.role,nowMs,timeOutMs)
-				rf.BecomeLeader()
-				rf.BroadcastHeartBeat()
+				fmt.Printf("me=%d role=%d now=%d timeout=%d become candidate\n",rf.me,rf.role,nowMs,timeOutMs)
+				rf.BecomeCandidate()
 			}
 		}
 
 		time.Sleep(time.Duration(interval_ms) * time.Millisecond)
 	}
+}
+
+func (rf *Raft) BecomeLeaderChecker(interval_ms int) {
+	for{
+		role := atomic.LoadInt32(&rf.role)
+		if role == 1 {//candidate
+
+			var wg sync.WaitGroup
+			var ok_num int 
+			var ok_num_mutex sync.Mutex 
+			var term int
+			var server_num int
+			var has_other_leader = false
+
+			rf.mu.Lock()
+			server_num = len(rf.peers)
+			term = int(rf.term)
+			rf.mu.Unlock()
+
+			for i:=0 ; i < server_num ; i++ {
+				if i != rf.me {
+					wg.Add(1)
+					go func(serverId int){
+						var rsp RequestVoteReply
+						ok := rf.sendRequestVote(serverId, &RequestVoteArgs{term,rf.me}, &rsp)
+						if ok && rsp.VoteGranted{
+							ok_num_mutex.Lock()
+							ok_num = ok_num + 1
+							ok_num_mutex.Unlock()
+						}else if rsp.FollowerTerm > term {
+							has_other_leader = true
+						}
+						wg.Done()
+					}(i)
+				}
+			}
+			wg.Wait()
+			if !has_other_leader && server_num/2 > ok_num {
+				rf.mu.Lock()
+				rf.role = 2 //leader
+				rf.term = rf.term + 1
+				fmt.Printf("id=%d term=%d become leader\n",rf.me,rf.term)
+				rf.mu.Unlock()
+			}
+		}
+
+		time.Sleep(time.Duration(interval_ms) * time.Millisecond)
+	}
+}
+
+func (rf *Raft) BecomeCandidate() {
+	rf.mu.Lock()
+	rf.role = 1 //candidate
+	rf.mu.Unlock()
 }
 
 func (rf *Raft) BecomeLeader() {
@@ -378,7 +436,7 @@ func (rf *Raft) BecomeLeader() {
 
 func (rf *Raft) ModifyHeartBeatTimeOut(){
 	heartBeatTimeOutMs := atomic.LoadInt64(&rf.heartBeatTimeOutMs)
-	upBound := 800
+	upBound := 500
 	lowBound := 300
 	nowMs := int(time.Now().UnixNano() / 1000000)
 	timeOutMs := nowMs + (((rand.Intn(1000) * (upBound - lowBound)) / 1000) + lowBound)
