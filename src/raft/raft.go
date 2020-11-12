@@ -14,6 +14,8 @@ package raft
 //				   TODO: fix the bug of there are leaders while expected no leader
 //2020-11-12 20:40 DONE: 在candidate状态下，群发requestsVote，并且根据响应是否成为leader逻辑
 //				   TODO: 完成candidate在一定时间内没有成为leader，会重新发起一次选举逻辑
+//2020-11-13 01:07 DONE: 重新写了candidate逻辑，和原本的candidate逻辑混在一起居然成功了
+//				   TODO: 优化并搞清楚成功的原因
 
 //
 // this is an outline of the API that raft must expose to
