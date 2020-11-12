@@ -436,21 +436,6 @@ func (rf *Raft) BecomeLeader() {
 	rf.mu.Unlock()
 }
 
-/*
-func (rf *Raft) ModifyHeartBeatTimeOut(){
-	heartBeatTimeOutMs := atomic.LoadInt64(&rf.heartBeatTimeOutMs)
-	upBound := 500
-	lowBound := 300
-	nowMs := int(time.Now().UnixNano() / 1000000)
-	timeOutMs := nowMs + 
-	fmt.Printf("+ModifyHeartBeatTimeOut:role=%d,id=%d,oldtimeout=%d,newtimeout=%d\n",rf.role,rf.me,heartBeatTimeOutMs,timeOutMs)
-	if timeOutMs > int(heartBeatTimeOutMs) {
-		atomic.StoreInt64(&rf.heartBeatTimeOutMs,int64(timeOutMs))
-	}
-	fmt.Printf("-ModifyHeartBeatTimeOut:role=%d,id=%d,timeout=%d\n",rf.role,rf.me,rf.heartBeatTimeOutMs)
-}
-*/
-
 //get random int
 func GenRandomInt(upBound int,lowBound int) int{
 	if lowBound > upBound {
