@@ -39,6 +39,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
 	//"fmt"
 	"../labrpc"
 )
@@ -78,11 +79,19 @@ type Raft struct {
 	// state a Raft server must maintain.
 
 	term               int
-	role               int //0-follower 1-candidate 2-leader
+	role               int   //0-follower 1-candidate 2-leader
 	votedFor           int   //last roted for someone.-1 means none of candidate has been voted
 	heartBeatTimeOutMs int64 //the time of peer become candidate if there is no heart beat received
-	recvHeartBeat 	   bool 
+	recvHeartBeat      bool
 	cond               *sync.Cond //condition variable that signal intter status has changed
+	log                []LogEntry
+	lastCommitted      int //the index of last committed log entry
+}
+
+//struct represent of a log entry
+type LogEntry struct {
+	term     int
+	logIndex int
 }
 
 // return currentTerm and whether this server
@@ -175,7 +184,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.role = 0 //follower
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
-	}else if args.CandidateTerm == rf.term && rf.role == 0 && rf.votedFor == args.CandidateId {
+	} else if args.CandidateTerm == rf.term && rf.role == 0 && rf.votedFor == args.CandidateId {
 		reply.VoteGranted = true
 	}
 
@@ -185,11 +194,16 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 //-----------------implement AppendEntries Service--------------------
 
 type AppendEntriesReq struct {
-	LeaderId int
-	Term     int
+	LeaderID     int
+	Term         int // Leader's term
+	PrevLogIndex int
+	PrevLogTerm  int
+	Entries      []LogEntry
 }
 
 type AppendEntriesRsp struct {
+	Term    int
+	Success bool
 }
 
 //2A: implements heartbeats only
@@ -199,7 +213,7 @@ func (rf *Raft) AppendEntries(req *AppendEntriesReq, rsp *AppendEntriesRsp) {
 	defer rf.mu.Unlock()
 	//fmt.Printf("AppendEntries:role=%d,id=%d\n",rf.role,rf.me)
 
-	if req.Term > rf.term || ( (req.Term == rf.term) && (rf.role == 1) ){
+	if req.Term > rf.term || ((req.Term == rf.term) && (rf.role == 1)) {
 		rf.role = 0 //follower
 		rf.term = req.Term
 	}
@@ -324,11 +338,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 }
 
 //because of this is parralel send heartbeat ,the time is controlable
-func (rf *Raft) BroadcastHeartBeat(){
+func (rf *Raft) BroadcastHeartBeat() {
 	for serverId, _ := range rf.peers {
 		if serverId != rf.me {
 			var rsp AppendEntriesRsp
-			go rf.sendAppendEntries(serverId, &AppendEntriesReq{rf.me,rf.term}, &rsp)
+			go rf.sendAppendEntries(serverId, &AppendEntriesReq{rf.me, rf.term}, &rsp)
 		}
 	}
 }
@@ -347,66 +361,64 @@ func (rf *Raft) HeartBeatSender(interval_ms int) {
 	}
 }
 
-
 //get random int
-func GenRandomInt(upBound int,lowBound int) int{
+func GenRandomInt(upBound int, lowBound int) int {
 	if lowBound > upBound {
 		//swap
-		t := lowBound 
-		lowBound = upBound 
+		t := lowBound
+		lowBound = upBound
 		upBound = t
 	}
-	return rand.Intn( upBound - lowBound ) + lowBound
+	return rand.Intn(upBound-lowBound) + lowBound
 }
 
 //thread that listening for election timeout
-func (rf *Raft) ElectionTimer(){
-	for{
+func (rf *Raft) ElectionTimer() {
+	for {
 		rf.mu.Lock()
-		if !rf.recvHeartBeat && rf.role==0 {
+		if !rf.recvHeartBeat && rf.role == 0 {
 			//follower and election time out
 			rf.role = 1 //candidate
 			go rf.TryToBecomeLeader()
 		}
-		rf.recvHeartBeat=false
+		rf.recvHeartBeat = false
 		rf.mu.Unlock()
 
-		electionTimeOut := GenRandomInt(300,500)
+		electionTimeOut := GenRandomInt(300, 500)
 		time.Sleep(time.Duration(electionTimeOut) * time.Millisecond)
 	}
 }
 
 //function that while peer become candidate been called
-func (rf *Raft) TryToBecomeLeader(){
-	for{
+func (rf *Raft) TryToBecomeLeader() {
+	for {
 		rf.mu.Lock()
 		serverNum := len(rf.peers)
 		term := rf.term
 		rf.mu.Unlock()
 
-		var mutex sync.Mutex//access timeOut,ok_num
-		var isTimeOut = false 
+		var mutex sync.Mutex //access timeOut,ok_num
+		var isTimeOut = false
 		var ok_num = 1 //one is the vote from yourself
 		var cond = sync.NewCond(&mutex)
 
 		//listen for timeout
-		go func(timeout_ms int){
+		go func(timeout_ms int) {
 			time.Sleep(time.Duration(timeout_ms) * time.Millisecond)
 			mutex.Lock()
-			isTimeOut = true 
+			isTimeOut = true
 			mutex.Unlock()
 			cond.Signal()
-		}(GenRandomInt(300,500))
+		}(GenRandomInt(300, 500))
 
-
-		for i := 0 ; i < serverNum ; i++{
-			if i!=rf.me{
-				go func(serverId int){
+		for i := 0; i < serverNum; i++ {
+			if i != rf.me {
+				go func(serverId int) {
 					var rsp RequestVoteReply
-					ok := rf.sendRequestVote(serverId,&RequestVoteArgs{int(term),rf.me},&rsp)
-					if ok && rsp.VoteGranted{
+					ok := rf.sendRequestVote(serverId, &RequestVoteArgs{int(term), rf.me}, &rsp)
+					if ok && rsp.VoteGranted {
 						mutex.Lock()
-						ok_num = ok_num+1 
+						ok_num = ok_num + 1
 						mutex.Unlock()
 						cond.Signal()
 					}
@@ -416,7 +428,7 @@ func (rf *Raft) TryToBecomeLeader(){
 
 		mutex.Lock()
 		//because of cond.Wait will release the lock,lock will not be locked for a long time
-		for !( (serverNum <= 2*ok_num) || isTimeOut ) {
+		for !((serverNum <= 2*ok_num) || isTimeOut) {
 			cond.Wait()
 		}
 
@@ -426,9 +438,9 @@ func (rf *Raft) TryToBecomeLeader(){
 			rf.role = 2 //leader
 			rf.term = rf.term + 1
 			isExitLoop = true
-		}else if rf.role==0{
+		} else if rf.role == 0 {
 			isExitLoop = true
-		}else{
+		} else {
 			rf.term = rf.term + 1
 		}
 
