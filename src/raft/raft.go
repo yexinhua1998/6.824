@@ -16,6 +16,8 @@ package raft
 //				   TODO: 完成candidate在一定时间内没有成为leader，会重新发起一次选举逻辑
 //2020-11-13 01:07 DONE: 重新写了candidate逻辑，和原本的candidate逻辑混在一起居然成功了
 //				   TODO: 优化并搞清楚成功的原因
+//2020-12-26 00:10 DONE: 大致写完RPC和其他goroutine的逻辑
+//                 TODO: 完成Start()中append command的逻辑，修正heartbeat中发送空append entreis请求的逻辑
 
 //
 // this is an outline of the API that raft must expose to
@@ -35,12 +37,15 @@ package raft
 //
 
 import (
+	"fmt"
 	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	//"fmt"
+	"encoding/json"
+
 	"../labrpc"
 )
 
@@ -86,12 +91,13 @@ type Raft struct {
 	cond               *sync.Cond //condition variable that signal intter status has changed
 	log                []LogEntry
 	lastCommitted      int //the index of last committed log entry
+	nextIndex          []int
 }
 
 //struct represent of a log entry
 type LogEntry struct {
-	term     int
-	logIndex int
+	Term     int
+	LogIndex int
 }
 
 // return currentTerm and whether this server
@@ -191,7 +197,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			reply.VoteGranted = true
 		} else if rf.role == 1 {
 			lastLogEntry := rf.log[len(rf.log)-1]
-			if lastLogEntry.term > args.CandidateTerm || (lastLogEntry.term == args.CandidateTerm && lastLogEntry.logIndex > args.LastLogIndex) {
+			if lastLogEntry.Term > args.CandidateTerm || (lastLogEntry.Term == args.CandidateTerm && lastLogEntry.LogIndex > args.LastLogIndex) {
 				rf.role = 0 //follower
 				rf.votedFor = args.CandidateId
 				reply.VoteGranted = true
@@ -199,7 +205,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		}
 	}
 
-	//fmt.Printf("RequestVote,id=%d,role=%d,req=%v,rsp=%v\n",rf.me,rf.role,args,reply)
+	fmt.Printf("RequestVote,id=%d,role=%d,req=%s,rsp=%s\n", rf.me, rf.role, toJSON(args), toJSON(reply))
 }
 
 //-----------------implement AppendEntries Service--------------------
@@ -226,7 +232,7 @@ func (rf *Raft) AppendEntries(req *AppendEntriesReq, rsp *AppendEntriesRsp) {
 	rf.recvHeartBeat = true
 	rsp.Success = false
 	rsp.Term = rf.term
-	//fmt.Printf("AppendEntries:role=%d,id=%d\n",rf.role,rf.me)
+	fmt.Printf("AppendEntries:role=%d,id=%d,req=%s\n", rf.role, rf.me, toJSON(req))
 
 	if req.Term >= rf.term {
 		rf.role = 0 //follower
@@ -236,7 +242,7 @@ func (rf *Raft) AppendEntries(req *AppendEntriesReq, rsp *AppendEntriesRsp) {
 	}
 
 	logSize := len(rf.log)
-	if logSize == req.PrevLogIndex && rf.log[logSize-1].term == req.PrevLogTerm {
+	if logSize == req.PrevLogIndex && rf.log[logSize-1].Term == req.PrevLogTerm {
 
 		rf.log = append(rf.log, req.Entries...)
 		rsp.Success = true
@@ -254,7 +260,9 @@ func (rf *Raft) AppendEntries(req *AppendEntriesReq, rsp *AppendEntriesRsp) {
 	}
 
 	logSize = len(rf.log)
-	rf.lastCommitted = IntMin(logSize, req.LeaderCommit)
+	rf.lastCommitted = intMin(logSize, req.LeaderCommit)
+
+	fmt.Printf("AppendEntries:role=%d,id=%d,rsp=%v\n", rf.role, rf.me, toJSON(rsp))
 
 }
 
@@ -314,11 +322,13 @@ func (rf *Raft) sendAppendEntries(server int, req *AppendEntriesReq, rsp *Append
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
+	// Your code here (2B).
+	if rf.role != 2 {
+		return -1, -1, false
+	}
 	index := -1
 	term := -1
 	isLeader := true
-
-	// Your code here (2B).
 
 	return index, term, isLeader
 }
@@ -364,8 +374,16 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (2A, 2B, 2C).
 	rf.role = 0
+	rf.term = 0
 	rf.recvHeartBeat = false
 	rf.cond = sync.NewCond(&rf.mu)
+	rf.log = make([]LogEntry, 1)
+	rf.log[0] = LogEntry{0, 0}
+	rf.lastCommitted = 0
+	rf.nextIndex = make([]int, len(rf.peers))
+	for serverID, _ := range rf.peers {
+		rf.nextIndex[serverID] = 0
+	}
 	go rf.HeartBeatSender(100)
 	go rf.ElectionTimer()
 
@@ -377,10 +395,13 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 //because of this is parralel send heartbeat ,the time is controlable
 func (rf *Raft) BroadcastHeartBeat() {
-	for serverId, _ := range rf.peers {
-		if serverId != rf.me {
+	for serverID, _ := range rf.peers {
+		if serverID != rf.me {
 			var rsp AppendEntriesRsp
-			go rf.sendAppendEntries(serverId, &AppendEntriesReq{rf.me, rf.term}, &rsp)
+			nextIndex := rf.nextIndex[serverID]
+			nextLogEntry := rf.log[nextIndex]
+			req := AppendEntriesReq{rf.me, rf.term, nextLogEntry.LogIndex, nextLogEntry.Term, rf.log[nextIndex:], rf.lastCommitted}
+			go rf.sendAppendEntries(serverID, &req, &rsp)
 		}
 	}
 }
@@ -435,9 +456,9 @@ func (rf *Raft) TryToBecomeLeader() {
 		term := rf.term
 		rf.mu.Unlock()
 
-		var mutex sync.Mutex //access timeOut,ok_num
+		var mutex sync.Mutex //access timeOut,okNum
 		var isTimeOut = false
-		var ok_num = 1 //one is the vote from yourself
+		var okNum = 1 //one is the vote from yourself
 		var cond = sync.NewCond(&mutex)
 
 		//listen for timeout
@@ -453,10 +474,12 @@ func (rf *Raft) TryToBecomeLeader() {
 			if i != rf.me {
 				go func(serverId int) {
 					var rsp RequestVoteReply
-					ok := rf.sendRequestVote(serverId, &RequestVoteArgs{int(term), rf.me}, &rsp)
+					lastLog := rf.log[len(rf.log)-1]
+					req := RequestVoteArgs{term, rf.me, lastLog.LogIndex, lastLog.Term}
+					ok := rf.sendRequestVote(serverId, &req, &rsp)
 					if ok && rsp.VoteGranted {
 						mutex.Lock()
-						ok_num = ok_num + 1
+						okNum++
 						mutex.Unlock()
 						cond.Signal()
 					}
@@ -466,7 +489,7 @@ func (rf *Raft) TryToBecomeLeader() {
 
 		mutex.Lock()
 		//because of cond.Wait will release the lock,lock will not be locked for a long time
-		for !((serverNum <= 2*ok_num) || isTimeOut) {
+		for !((serverNum <= 2*okNum) || isTimeOut) {
 			cond.Wait()
 		}
 
@@ -474,12 +497,12 @@ func (rf *Raft) TryToBecomeLeader() {
 
 		if !isTimeOut {
 			rf.role = 2 //leader
-			rf.term = rf.term + 1
+			rf.term++
 			isExitLoop = true
 		} else if rf.role == 0 {
 			isExitLoop = true
 		} else {
-			rf.term = rf.term + 1
+			rf.term++
 		}
 
 		mutex.Unlock()
@@ -490,10 +513,15 @@ func (rf *Raft) TryToBecomeLeader() {
 	}
 }
 
-func IntMin(x int, y int) int {
+func intMin(x int, y int) int {
 	if x > y {
 		return y
 	} else {
 		return x
 	}
+}
+
+func toJSON(v interface{}) string {
+	data, _ := json.Marshal(v)
+	return string(data)
 }
