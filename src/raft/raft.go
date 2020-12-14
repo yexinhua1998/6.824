@@ -211,13 +211,40 @@ type AppendEntriesRsp struct {
 func (rf *Raft) AppendEntries(req *AppendEntriesReq, rsp *AppendEntriesRsp) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer func() { rf.recvHeartBeat = true }()
+	rsp.Success = false
+	rsp.Term = rf.term
 	//fmt.Printf("AppendEntries:role=%d,id=%d\n",rf.role,rf.me)
 
-	if req.Term > rf.term || ((req.Term == rf.term) && (rf.role == 1)) {
+	if req.Term >= rf.term {
 		rf.role = 0 //follower
 		rf.term = req.Term
+	} else {
+		return
 	}
-	rf.recvHeartBeat = true
+
+	logSize := len(rf.log)
+	if logSize == req.PrevLogIndex && rf.log[logSize-1].term == req.PrevLogTerm {
+
+		rf.log = append(rf.log, req.Entries...)
+		rsp.Success = true
+		return
+
+	} else {
+
+		if logSize >= req.PrevLogIndex+1 && rf.lastCommitted < req.PrevLogIndex {
+			rf.log = rf.log[:req.PrevLogIndex+1]
+			rf.log = append(rf.log)
+			rsp.Success = true
+			return
+		}
+
+		//leader's log entries cannot append to follower's log
+		//wait for next append entries rpc
+		if logSize < req.PrevLogIndex+1 {
+			return
+		}
+	}
 }
 
 //--------------------------------------------------------------------
