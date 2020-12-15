@@ -156,6 +156,8 @@ type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
 	CandidateTerm int //candidate's term
 	CandidateId   int
+	LastLogIndex  int
+	LastLogTerm   int
 }
 
 //
@@ -184,8 +186,17 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.role = 0 //follower
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
-	} else if args.CandidateTerm == rf.term && rf.role == 0 && rf.votedFor == args.CandidateId {
-		reply.VoteGranted = true
+	} else if args.CandidateTerm == rf.term {
+		if rf.role == 0 && rf.votedFor == args.CandidateId {
+			reply.VoteGranted = true
+		} else if rf.role == 1 {
+			lastLogEntry := rf.log[len(rf.log)-1]
+			if lastLogEntry.term > args.CandidateTerm || (lastLogEntry.term == args.CandidateTerm && lastLogEntry.logIndex > args.LastLogIndex) {
+				rf.role = 0 //follower
+				rf.votedFor = args.CandidateId
+				reply.VoteGranted = true
+			}
+		}
 	}
 
 	//fmt.Printf("RequestVote,id=%d,role=%d,req=%v,rsp=%v\n",rf.me,rf.role,args,reply)
