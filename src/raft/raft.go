@@ -199,6 +199,7 @@ type AppendEntriesReq struct {
 	PrevLogIndex int
 	PrevLogTerm  int
 	Entries      []LogEntry
+	LeaderCommit int
 }
 
 type AppendEntriesRsp struct {
@@ -211,7 +212,7 @@ type AppendEntriesRsp struct {
 func (rf *Raft) AppendEntries(req *AppendEntriesReq, rsp *AppendEntriesRsp) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	defer func() { rf.recvHeartBeat = true }()
+	rf.recvHeartBeat = true
 	rsp.Success = false
 	rsp.Term = rf.term
 	//fmt.Printf("AppendEntries:role=%d,id=%d\n",rf.role,rf.me)
@@ -228,7 +229,6 @@ func (rf *Raft) AppendEntries(req *AppendEntriesReq, rsp *AppendEntriesRsp) {
 
 		rf.log = append(rf.log, req.Entries...)
 		rsp.Success = true
-		return
 
 	} else {
 
@@ -236,15 +236,15 @@ func (rf *Raft) AppendEntries(req *AppendEntriesReq, rsp *AppendEntriesRsp) {
 			rf.log = rf.log[:req.PrevLogIndex+1]
 			rf.log = append(rf.log)
 			rsp.Success = true
-			return
 		}
 
 		//leader's log entries cannot append to follower's log
 		//wait for next append entries rpc
-		if logSize < req.PrevLogIndex+1 {
-			return
-		}
 	}
+
+	logSize = len(rf.log)
+	rf.lastCommitted = IntMin(logSize, req.LeaderCommit)
+
 }
 
 //--------------------------------------------------------------------
@@ -476,5 +476,13 @@ func (rf *Raft) TryToBecomeLeader() {
 		if isExitLoop {
 			break
 		}
+	}
+}
+
+func IntMin(x int, y int) int {
+	if x > y {
+		return y
+	} else {
+		return x
 	}
 }
