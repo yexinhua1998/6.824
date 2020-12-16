@@ -18,6 +18,8 @@ package raft
 //				   TODO: 优化并搞清楚成功的原因
 //2020-12-26 00:10 DONE: 大致写完RPC和其他goroutine的逻辑
 //                 TODO: 完成Start()中append command的逻辑，修正heartbeat中发送空append entreis请求的逻辑
+//2020-12-17 00:35 DONE: 大致完成了syncEntries2Followers()中的逻辑，但同时监听多个事件的逻辑还没有写完
+//                 TODO: 用channel+select的方法重写syncEntries2Followers()的逻辑，同时监听多个事件
 
 //
 // this is an outline of the API that raft must expose to
@@ -88,7 +90,7 @@ type Raft struct {
 	votedFor           int   //last roted for someone.-1 means none of candidate has been voted
 	heartBeatTimeOutMs int64 //the time of peer become candidate if there is no heart beat received
 	recvHeartBeat      bool
-	cond               *sync.Cond //condition variable that signal intter status has changed
+	condRoleChanged    *sync.Cond //condition variable that signal role is changed
 	log                []LogEntry
 	lastCommitted      int //the index of last committed log entry
 	nextIndex          []int
@@ -235,8 +237,12 @@ func (rf *Raft) AppendEntries(req *AppendEntriesReq, rsp *AppendEntriesRsp) {
 	fmt.Printf("AppendEntries:role=%d,id=%d,req=%s\n", rf.role, rf.me, toJSON(req))
 
 	if req.Term >= rf.term {
+		oldRole := rf.role
 		rf.role = 0 //follower
 		rf.term = req.Term
+		if oldRole != 0 {
+			rf.condRoleChanged.Signal()
+		}
 	} else {
 		return
 	}
@@ -326,10 +332,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	if rf.role != 2 {
 		return -1, -1, false
 	}
-	logSize = len(rf.log)
-	logEntry := LogEntry{rf.term,logSize}
-	rf.log = append(rf.log,logEntry)
-	go 
+	logSize := len(rf.log)
+	logEntry := LogEntry{rf.term, logSize}
+	rf.log = append(rf.log, logEntry)
+	//go
 	index := -1
 	term := -1
 	isLeader := true
@@ -532,13 +538,32 @@ func toJSON(v interface{}) string {
 
 //sync leader's entries to followers
 func (rf *Raft) syncEntries2Followers() {
+
+	var mutex sync.Mutex //access okNum
+	var okNum = 1        //one is log in yourself
+	var cond = sync.NewCond(&mutex)
+
 	for serverID, _ := range rf.peers {
 		if serverID != rf.me {
-			go func(){
+			go func(serverID int) {
 				//call syncEntries2Follower parallely and send the signal to father goroutine
-			}()
+				success := rf.syncEntries2Follower(serverID)
+				if success {
+					mutex.Lock()
+					okNum++
+					cond.Signal()
+					mutex.Unlock()
+				}
+			}(serverID)
 		}
 	}
+
+	//listen for role changed
+	go func() {
+		for rf.role == 2 {
+			rf.condRoleChanged.Wait()
+		}
+	}()
 }
 
 func (rf *Raft) syncEntries2Follower(serverID int) bool {
