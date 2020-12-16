@@ -326,6 +326,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	if rf.role != 2 {
 		return -1, -1, false
 	}
+	logSize = len(rf.log)
+	logEntry := LogEntry{rf.term,logSize}
+	rf.log = append(rf.log,logEntry)
+	go 
 	index := -1
 	term := -1
 	isLeader := true
@@ -524,4 +528,34 @@ func intMin(x int, y int) int {
 func toJSON(v interface{}) string {
 	data, _ := json.Marshal(v)
 	return string(data)
+}
+
+//sync leader's entries to followers
+func (rf *Raft) syncEntries2Followers() {
+	for serverID, _ := range rf.peers {
+		if serverID != rf.me {
+			go func(){
+				//call syncEntries2Follower parallely and send the signal to father goroutine
+			}()
+		}
+	}
+}
+
+func (rf *Raft) syncEntries2Follower(serverID int) bool {
+	for {
+		nextIndex := rf.nextIndex[serverID]
+		prevLog := rf.log[nextIndex]
+		req := AppendEntriesReq{rf.me, rf.term, prevLog.LogIndex, prevLog.Term, rf.log[nextIndex:], rf.lastCommitted}
+		rsp := AppendEntriesRsp{}
+		ok := rf.sendAppendEntries(serverID, &req, &rsp)
+		if !ok {
+			return false
+		}
+		if rsp.Success {
+			return true
+		} else {
+			rf.nextIndex[serverID]--
+			continue
+		}
+	}
 }
