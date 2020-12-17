@@ -537,23 +537,22 @@ func toJSON(v interface{}) string {
 }
 
 //sync leader's entries to followers
-func (rf *Raft) syncEntries2Followers() {
+func (rf *Raft) syncEntries2Followers(commited chan bool) {
 
 	var mutex sync.Mutex //access okNum
 	var okNum = 1        //one is log in yourself
+	var failNum = 0
 	var cond = sync.NewCond(&mutex)
+	var done = make(chan int)
+	var syncResult = make(chan bool)
+	var becomeFollower = make(chan bool)
 
 	for serverID, _ := range rf.peers {
 		if serverID != rf.me {
 			go func(serverID int) {
 				//call syncEntries2Follower parallely and send the signal to father goroutine
 				success := rf.syncEntries2Follower(serverID)
-				if success {
-					mutex.Lock()
-					okNum++
-					cond.Signal()
-					mutex.Unlock()
-				}
+				syncResult <- success
 			}(serverID)
 		}
 	}
@@ -562,8 +561,39 @@ func (rf *Raft) syncEntries2Followers() {
 	go func() {
 		for rf.role == 2 {
 			rf.condRoleChanged.Wait()
+			select {
+			case <-done: //father goroutine is left
+				return
+			default:
+				continue
+			}
 		}
+		becomeFollower <- true
 	}()
+
+	select {
+
+	case success := <-syncResult:
+		if success {
+			okNum++
+			if 2*okNum >= len(rf.peers) {
+				//log replicated to majority of peers
+				commited <- true
+				close(done)
+			}
+		} else {
+			failNum++
+			if 2*failNum >= len(rf.peers) {
+				commited <- false
+				close(done)
+			}
+		}
+
+	case <-becomeFollower:
+		commited <- false
+		return
+
+	}
 }
 
 func (rf *Raft) syncEntries2Follower(serverID int) bool {
