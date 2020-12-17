@@ -20,6 +20,8 @@ package raft
 //                 TODO: 完成Start()中append command的逻辑，修正heartbeat中发送空append entreis请求的逻辑
 //2020-12-17 00:35 DONE: 大致完成了syncEntries2Followers()中的逻辑，但同时监听多个事件的逻辑还没有写完
 //                 TODO: 用channel+select的方法重写syncEntries2Followers()的逻辑，同时监听多个事件
+//2020-12-18 00:48 DONE: 用channel+select的方法大致重写syncEntries2Followers()的逻辑，同时监听多个事件
+//                 TODO: 重写Start()逻辑，它是不保证commited且立刻返回的。可以使用直接append进去，通知另一个goroutine去一直消费，确保committed
 
 //
 // this is an outline of the API that raft must expose to
@@ -186,6 +188,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	rf.recvHeartBeat = true
 	reply.FollowerTerm = rf.term
 	reply.VoteGranted = false
 	if args.CandidateTerm > rf.term {
@@ -248,16 +251,16 @@ func (rf *Raft) AppendEntries(req *AppendEntriesReq, rsp *AppendEntriesRsp) {
 	}
 
 	logSize := len(rf.log)
-	if logSize == req.PrevLogIndex && rf.log[logSize-1].Term == req.PrevLogTerm {
+	if logSize-1 == req.PrevLogIndex && rf.log[logSize-1].Term == req.PrevLogTerm {
 
 		rf.log = append(rf.log, req.Entries...)
 		rsp.Success = true
 
 	} else {
 
-		if logSize >= req.PrevLogIndex+1 && rf.lastCommitted < req.PrevLogIndex {
+		if logSize-1 > req.PrevLogIndex && rf.lastCommitted < req.PrevLogIndex {
 			rf.log = rf.log[:req.PrevLogIndex+1]
-			rf.log = append(rf.log)
+			rf.log = append(rf.log, req.Entries...)
 			rsp.Success = true
 		}
 
@@ -329,18 +332,21 @@ func (rf *Raft) sendAppendEntries(server int, req *AppendEntriesReq, rsp *Append
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
+	rf.mu.Lock()
 	if rf.role != 2 {
+		rf.mu.Unlock()
 		return -1, -1, false
 	}
 	logSize := len(rf.log)
 	logEntry := LogEntry{rf.term, logSize}
 	rf.log = append(rf.log, logEntry)
-	//go
-	index := -1
-	term := -1
-	isLeader := true
+	rf.mu.Unlock()
 
-	return index, term, isLeader
+	var committed = make(chan bool)
+	rf.syncEntries2Followers(committed)
+	success := <-committed
+
+	return logSize, rf.term, success
 }
 
 //
@@ -386,11 +392,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.role = 0
 	rf.term = 0
 	rf.recvHeartBeat = false
-	rf.cond = sync.NewCond(&rf.mu)
 	rf.log = make([]LogEntry, 1)
 	rf.log[0] = LogEntry{0, 0}
 	rf.lastCommitted = 0
 	rf.nextIndex = make([]int, len(rf.peers))
+	rf.condRoleChanged = sync.NewCond(&rf.mu)
 	for serverID, _ := range rf.peers {
 		rf.nextIndex[serverID] = 0
 	}
@@ -408,9 +414,7 @@ func (rf *Raft) BroadcastHeartBeat() {
 	for serverID, _ := range rf.peers {
 		if serverID != rf.me {
 			var rsp AppendEntriesRsp
-			nextIndex := rf.nextIndex[serverID]
-			nextLogEntry := rf.log[nextIndex]
-			req := AppendEntriesReq{rf.me, rf.term, nextLogEntry.LogIndex, nextLogEntry.Term, rf.log[nextIndex:], rf.lastCommitted}
+			req := AppendEntriesReq{rf.me, rf.term, len(rf.log), rf.term, make([]LogEntry, 0), rf.lastCommitted}
 			go rf.sendAppendEntries(serverID, &req, &rsp)
 		}
 	}
@@ -444,17 +448,19 @@ func GenRandomInt(upBound int, lowBound int) int {
 //thread that listening for election timeout
 func (rf *Raft) ElectionTimer() {
 	for {
+		electionTimeOut := GenRandomInt(300, 500)
+		time.Sleep(time.Duration(electionTimeOut) * time.Millisecond)
+
 		rf.mu.Lock()
 		if !rf.recvHeartBeat && rf.role == 0 {
 			//follower and election time out
 			rf.role = 1 //candidate
+			rf.term++
 			go rf.TryToBecomeLeader()
 		}
 		rf.recvHeartBeat = false
 		rf.mu.Unlock()
 
-		electionTimeOut := GenRandomInt(300, 500)
-		time.Sleep(time.Duration(electionTimeOut) * time.Millisecond)
 	}
 }
 
@@ -507,7 +513,6 @@ func (rf *Raft) TryToBecomeLeader() {
 
 		if !isTimeOut {
 			rf.role = 2 //leader
-			rf.term++
 			isExitLoop = true
 		} else if rf.role == 0 {
 			isExitLoop = true
@@ -539,10 +544,8 @@ func toJSON(v interface{}) string {
 //sync leader's entries to followers
 func (rf *Raft) syncEntries2Followers(commited chan bool) {
 
-	var mutex sync.Mutex //access okNum
-	var okNum = 1        //one is log in yourself
+	var okNum = 1 //one is log in yourself
 	var failNum = 0
-	var cond = sync.NewCond(&mutex)
 	var done = make(chan int)
 	var syncResult = make(chan bool)
 	var becomeFollower = make(chan bool)
@@ -559,6 +562,7 @@ func (rf *Raft) syncEntries2Followers(commited chan bool) {
 
 	//listen for role changed
 	go func() {
+		rf.mu.Lock()
 		for rf.role == 2 {
 			rf.condRoleChanged.Wait()
 			select {
@@ -569,6 +573,7 @@ func (rf *Raft) syncEntries2Followers(commited chan bool) {
 			}
 		}
 		becomeFollower <- true
+		rf.mu.Unlock()
 	}()
 
 	select {
@@ -607,10 +612,15 @@ func (rf *Raft) syncEntries2Follower(serverID int) bool {
 			return false
 		}
 		if rsp.Success {
+			rf.nextIndex[serverID] = len(rf.log)
 			return true
 		} else {
-			rf.nextIndex[serverID]--
-			continue
+			if rf.nextIndex[serverID] > 0 {
+				rf.nextIndex[serverID]--
+				continue
+			} else {
+				return false
+			}
 		}
 	}
 }
