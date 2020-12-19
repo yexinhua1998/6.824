@@ -22,6 +22,8 @@ package raft
 //                 TODO: 用channel+select的方法重写syncEntries2Followers()的逻辑，同时监听多个事件
 //2020-12-18 00:48 DONE: 用channel+select的方法大致重写syncEntries2Followers()的逻辑，同时监听多个事件
 //                 TODO: 重写Start()逻辑，它是不保证commited且立刻返回的。可以使用直接append进去，通知另一个goroutine去一直消费，确保committed
+//2020-12-18 21:35 DONE: 重写整个Start Commit Apply逻辑,PASS了两个测试
+//                 TODO: 重写RequestsVote逻辑
 
 //
 // this is an outline of the API that raft must expose to
@@ -96,12 +98,20 @@ type Raft struct {
 	log                []LogEntry
 	lastCommitted      int //the index of last committed log entry
 	nextIndex          []int
+
+	condAppStartLog *sync.Cond //the condition variable tha signal app add a log to local
+
+	applyCh     chan ApplyMsg
+	lastApplied int
+
+	condCommitedIncre *sync.Cond
 }
 
 //struct represent of a log entry
 type LogEntry struct {
 	Term     int
 	LogIndex int
+	Command  interface{}
 }
 
 // return currentTerm and whether this server
@@ -117,6 +127,7 @@ func (rf *Raft) GetState() (int, bool) {
 	term = int(rf.term)
 	isleader = rf.role == 2 //is leader
 
+	fmt.Printf("GetState():role=%d term=%d isleader=%v\n", rf.role, term, isleader)
 	return term, isleader
 }
 
@@ -188,16 +199,26 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	rf.recvHeartBeat = true
 	reply.FollowerTerm = rf.term
 	reply.VoteGranted = false
+	//__STOP_AT_HERE__
+	//fix
+
 	if args.CandidateTerm > rf.term {
 		//switch to follower
 		rf.term = args.CandidateTerm
-		rf.role = 0 //follower
-		rf.votedFor = args.CandidateId
+		rf.role = 0      //follower
+		rf.votedFor = -1 //mean null
+		rf.condRoleChanged.Broadcast()
+	}
+	lastLog := rf.log[len(rf.log)-1]
+	if rf.votedFor == args.CandidateId || args.LastLogTerm > lastLog.Term || (args.LastLogTerm == lastLog.Term && args.LastLogIndex >= lastLog.LogIndex) {
 		reply.VoteGranted = true
-	} else if args.CandidateTerm == rf.term {
+		rf.votedFor = args.CandidateId
+		rf.recvHeartBeat = true
+	}
+
+	/*if args.CandidateTerm == rf.term {
 		if rf.role == 0 && rf.votedFor == args.CandidateId {
 			reply.VoteGranted = true
 		} else if rf.role == 1 {
@@ -208,7 +229,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 				reply.VoteGranted = true
 			}
 		}
-	}
+	}*/
 
 	fmt.Printf("RequestVote,id=%d,role=%d,req=%s,rsp=%s\n", rf.me, rf.role, toJSON(args), toJSON(reply))
 }
@@ -222,6 +243,8 @@ type AppendEntriesReq struct {
 	PrevLogTerm  int
 	Entries      []LogEntry
 	LeaderCommit int
+
+	Debug string
 }
 
 type AppendEntriesRsp struct {
@@ -241,16 +264,21 @@ func (rf *Raft) AppendEntries(req *AppendEntriesReq, rsp *AppendEntriesRsp) {
 
 	if req.Term >= rf.term {
 		oldRole := rf.role
+		oldTerm := rf.term
 		rf.role = 0 //follower
 		rf.term = req.Term
 		if oldRole != 0 {
-			rf.condRoleChanged.Signal()
+			rf.condRoleChanged.Broadcast()
+		}
+		if rf.term > oldTerm {
+			rf.votedFor = -1 //mean null
 		}
 	} else {
 		return
 	}
 
 	logSize := len(rf.log)
+	fmt.Printf("id=%d role=%d term=%d log=%s\n", rf.me, rf.role, rf.term, toJSON(rf.log))
 	if logSize-1 == req.PrevLogIndex && rf.log[logSize-1].Term == req.PrevLogTerm {
 
 		rf.log = append(rf.log, req.Entries...)
@@ -269,7 +297,17 @@ func (rf *Raft) AppendEntries(req *AppendEntriesReq, rsp *AppendEntriesRsp) {
 	}
 
 	logSize = len(rf.log)
-	rf.lastCommitted = intMin(logSize, req.LeaderCommit)
+	haveCommitedIncrement := false
+	for logSize-1 > rf.lastCommitted && req.LeaderCommit > rf.lastCommitted {
+		rf.lastCommitted++
+		haveCommitedIncrement = true
+		fmt.Printf("id=%d role=%d log %d commited\n", rf.me, rf.role, rf.lastCommitted)
+	}
+
+	if haveCommitedIncrement {
+		//notify applyer to apply command to application
+		rf.condCommitedIncre.Signal()
+	}
 
 	fmt.Printf("AppendEntries:role=%d,id=%d,rsp=%v\n", rf.role, rf.me, toJSON(rsp))
 
@@ -337,16 +375,16 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.mu.Unlock()
 		return -1, -1, false
 	}
+	term := rf.term
 	logSize := len(rf.log)
-	logEntry := LogEntry{rf.term, logSize}
+	logEntry := LogEntry{rf.term, logSize, command}
 	rf.log = append(rf.log, logEntry)
+	rf.condAppStartLog.Broadcast()
 	rf.mu.Unlock()
 
-	var committed = make(chan bool)
-	rf.syncEntries2Followers(committed)
-	success := <-committed
+	fmt.Printf("start a command.log = %s\n", toJSON(logEntry))
 
-	return logSize, rf.term, success
+	return logSize, term, true
 }
 
 //
@@ -393,15 +431,35 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.term = 0
 	rf.recvHeartBeat = false
 	rf.log = make([]LogEntry, 1)
-	rf.log[0] = LogEntry{0, 0}
+	rf.log[0] = LogEntry{0, 0, nil}
 	rf.lastCommitted = 0
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.condRoleChanged = sync.NewCond(&rf.mu)
-	for serverID, _ := range rf.peers {
-		rf.nextIndex[serverID] = 0
+	rf.condAppStartLog = sync.NewCond(&rf.mu)
+
+	rf.applyCh = applyCh
+
+	rf.condCommitedIncre = sync.NewCond(&rf.mu)
+
+	rf.lastApplied = 0
+
+	syncIndexChan := make(chan int)
+
+	var serverID int
+	for serverID, _ = range rf.peers {
+		rf.nextIndex[serverID] = 1
 	}
 	go rf.HeartBeatSender(100)
 	go rf.ElectionTimer()
+
+	for serverID, _ = range rf.peers {
+		if serverID != rf.me {
+			go rf.syncConsumer(serverID, syncIndexChan)
+		}
+	}
+
+	go rf.leaderCommitter(syncIndexChan)
+	go rf.applier()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -414,7 +472,8 @@ func (rf *Raft) BroadcastHeartBeat() {
 	for serverID, _ := range rf.peers {
 		if serverID != rf.me {
 			var rsp AppendEntriesRsp
-			req := AppendEntriesReq{rf.me, rf.term, len(rf.log), rf.term, make([]LogEntry, 0), rf.lastCommitted}
+			lastLog := rf.log[len(rf.log)-1]
+			req := AppendEntriesReq{rf.me, rf.term, lastLog.LogIndex, lastLog.Term, make([]LogEntry, 0), rf.lastCommitted, "heartbeat"}
 			go rf.sendAppendEntries(serverID, &req, &rsp)
 		}
 	}
@@ -513,6 +572,9 @@ func (rf *Raft) TryToBecomeLeader() {
 
 		if !isTimeOut {
 			rf.role = 2 //leader
+			for serverID, _ := range rf.peers {
+				rf.nextIndex[serverID] = len(rf.log)
+			}
 			isExitLoop = true
 		} else if rf.role == 0 {
 			isExitLoop = true
@@ -541,6 +603,109 @@ func toJSON(v interface{}) string {
 	return string(data)
 }
 
+//listen to commited index and apply to leader's application
+func (rf *Raft) applier() {
+	for {
+		rf.mu.Lock()
+		for !(rf.lastCommitted > rf.lastApplied) {
+			rf.condCommitedIncre.Wait()
+		}
+		//rf.lastCommitted > rf.lastApplied
+		commandIndex := rf.lastApplied + 1
+		rf.applyCh <- ApplyMsg{true, rf.log[commandIndex].Command, commandIndex}
+		fmt.Printf("id=%d role=%d log %d applied\n", rf.me, rf.role, commandIndex)
+		rf.lastApplied++
+		rf.mu.Unlock()
+	}
+}
+
+//commit leader's log if it is replicated in majority of peers
+func (rf *Raft) leaderCommitter(syncIndexChan chan int) {
+	replicatedNum := make([]int, 1, 1024)
+	for {
+		syncIndex := <-syncIndexChan
+		func() {
+			rf.mu.Lock()
+			defer rf.mu.Unlock()
+			if rf.role != 2 {
+				return
+			}
+			for syncIndex > len(replicatedNum)-1 {
+				replicatedNum = append(replicatedNum, 1) //1 is leader itself
+			}
+			//syncIndex <= len(replicatedNum)-1
+			replicatedNum[syncIndex]++
+
+			if syncIndex != rf.lastCommitted+1 {
+				return
+			}
+			//syncIndex == rf.lastCommitted+1
+			if 2*replicatedNum[syncIndex] >= len(rf.peers) {
+				rf.lastCommitted++
+				rf.condCommitedIncre.Signal()
+				fmt.Printf("id=%d role=%d log %d commited\n", rf.me, rf.role, rf.lastCommitted)
+			}
+		}()
+
+	}
+}
+
+//sync logs to serverID
+func (rf *Raft) syncConsumer(serverID int, syncIndexChan chan int) {
+	fmt.Printf("start syncConsumer(%d) in %d\n", serverID, rf.me)
+	for {
+		rf.mu.Lock()
+		oldLogLen := len(rf.log)
+		for !(oldLogLen < len(rf.log)) {
+			fmt.Printf("syncConsumer(%d) in %d:Waiting for cv\n", serverID, rf.me)
+			rf.condAppStartLog.Wait()
+		}
+		fmt.Printf("syncConsumer(%d) in %d:run\n", serverID, rf.me)
+
+		//app add log to raft.Start to sync log to followers
+		syncIndex := len(rf.log) - 1
+		role := rf.role
+		rf.mu.Unlock()
+		if role != 2 {
+			continue
+		}
+
+		var done = make(chan int)
+
+		//listen for role become not leader
+		roleBecomeNotLeader := make(chan int)
+		go func() {
+			rf.mu.Lock()
+			defer rf.mu.Unlock()
+			for rf.role == 2 {
+				select {
+				case <-done:
+					return
+				default:
+				}
+				rf.condRoleChanged.Wait()
+			}
+			//rf.role != 2
+			roleBecomeNotLeader <- 0
+		}()
+
+		synced := make(chan bool)
+		go func() {
+			success := rf.syncEntries2Follower(serverID, done)
+			synced <- success
+		}()
+
+		select {
+		case <-roleBecomeNotLeader:
+			close(done)
+		case success := <-synced:
+			if success {
+				syncIndexChan <- syncIndex
+			}
+		}
+	}
+}
+
 //sync leader's entries to followers
 func (rf *Raft) syncEntries2Followers(commited chan bool) {
 
@@ -554,7 +719,7 @@ func (rf *Raft) syncEntries2Followers(commited chan bool) {
 		if serverID != rf.me {
 			go func(serverID int) {
 				//call syncEntries2Follower parallely and send the signal to father goroutine
-				success := rf.syncEntries2Follower(serverID)
+				success := rf.syncEntries2Follower(serverID, done)
 				syncResult <- success
 			}(serverID)
 		}
@@ -601,11 +766,16 @@ func (rf *Raft) syncEntries2Followers(commited chan bool) {
 	}
 }
 
-func (rf *Raft) syncEntries2Follower(serverID int) bool {
+func (rf *Raft) syncEntries2Follower(serverID int, done chan int) bool {
 	for {
+		select {
+		case <-done:
+			return false
+		default:
+		}
 		nextIndex := rf.nextIndex[serverID]
-		prevLog := rf.log[nextIndex]
-		req := AppendEntriesReq{rf.me, rf.term, prevLog.LogIndex, prevLog.Term, rf.log[nextIndex:], rf.lastCommitted}
+		prevLog := rf.log[nextIndex-1]
+		req := AppendEntriesReq{rf.me, rf.term, prevLog.LogIndex, prevLog.Term, rf.log[nextIndex:], rf.lastCommitted, "sync"}
 		rsp := AppendEntriesRsp{}
 		ok := rf.sendAppendEntries(serverID, &req, &rsp)
 		if !ok {
@@ -615,7 +785,7 @@ func (rf *Raft) syncEntries2Follower(serverID int) bool {
 			rf.nextIndex[serverID] = len(rf.log)
 			return true
 		} else {
-			if rf.nextIndex[serverID] > 0 {
+			if rf.nextIndex[serverID] > 1 {
 				rf.nextIndex[serverID]--
 				continue
 			} else {
