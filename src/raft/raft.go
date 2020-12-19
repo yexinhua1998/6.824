@@ -255,12 +255,12 @@ type AppendEntriesRsp struct {
 //2A: implements heartbeats only
 
 func (rf *Raft) AppendEntries(req *AppendEntriesReq, rsp *AppendEntriesRsp) {
+	fmt.Printf("AppendEntries:role=%d,id=%d,req=%s\n", rf.role, rf.me, toJSON(req))
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	rf.recvHeartBeat = true
 	rsp.Success = false
 	rsp.Term = rf.term
-	fmt.Printf("AppendEntries:role=%d,id=%d,req=%s\n", rf.role, rf.me, toJSON(req))
 
 	if req.Term >= rf.term {
 		oldRole := rf.role
@@ -686,7 +686,16 @@ func (rf *Raft) syncConsumer(serverID int, syncIndexChan chan int) {
 				rf.condRoleChanged.Wait()
 			}
 			//rf.role != 2
-			roleBecomeNotLeader <- 0
+			//fmt.Printf("id=%d role=%d write to roleBecomeNotLeader\n", rf.me, rf.role)
+			select {
+			case roleBecomeNotLeader <- 0:
+				//fmt.Printf("id=%d role=%d write to roleBecomeNotLeader done\n", rf.me, rf.role)
+
+			default:
+				//fmt.Printf("id=%d role=%d cannot write to roleBecomeNotLeader\n", rf.me, rf.role)
+
+			}
+
 		}()
 
 		synced := make(chan bool)
