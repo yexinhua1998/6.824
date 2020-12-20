@@ -258,6 +258,7 @@ func (rf *Raft) AppendEntries(req *AppendEntriesReq, rsp *AppendEntriesRsp) {
 	fmt.Printf("AppendEntries:role=%d,id=%d,req=%s\n", rf.role, rf.me, toJSON(req))
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	fmt.Printf("")
 	rf.recvHeartBeat = true
 	rsp.Success = false
 	rsp.Term = rf.term
@@ -279,22 +280,28 @@ func (rf *Raft) AppendEntries(req *AppendEntriesReq, rsp *AppendEntriesRsp) {
 
 	logSize := len(rf.log)
 	fmt.Printf("id=%d role=%d term=%d log=%s\n", rf.me, rf.role, rf.term, toJSON(rf.log))
-	if logSize-1 == req.PrevLogIndex && rf.log[logSize-1].Term == req.PrevLogTerm {
-
-		rf.log = append(rf.log, req.Entries...)
+	if logSize > req.PrevLogIndex && rf.log[req.PrevLogIndex].Term == req.PrevLogTerm {
+		rf.log = append(rf.log[:req.PrevLogIndex+1], req.Entries...)
 		rsp.Success = true
+	}
+	/*
+		// old code
+		if logSize-1 == req.PrevLogIndex && rf.log[logSize-1].Term == req.PrevLogTerm {
 
-	} else {
-
-		if logSize-1 > req.PrevLogIndex && rf.lastCommitted < req.PrevLogIndex {
-			rf.log = rf.log[:req.PrevLogIndex+1]
 			rf.log = append(rf.log, req.Entries...)
 			rsp.Success = true
-		}
 
-		//leader's log entries cannot append to follower's log
-		//wait for next append entries rpc
-	}
+		} else {
+
+			if logSize-1 > req.PrevLogIndex && rf.lastCommitted < req.PrevLogIndex {
+				rf.log = rf.log[:req.PrevLogIndex+1]
+				rf.log = append(rf.log, req.Entries...)
+				rsp.Success = true
+			}
+
+			//leader's log entries cannot append to follower's log
+			//wait for next append entries rpc
+		}*/
 
 	logSize = len(rf.log)
 	haveCommitedIncrement := false
