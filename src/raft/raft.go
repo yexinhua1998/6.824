@@ -116,6 +116,12 @@ type LogEntry struct {
 	Command  interface{}
 }
 
+//struct represent a sync action info
+type SyncInfo struct {
+	FollowerID int
+	SyncIndex  int
+}
+
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
@@ -454,7 +460,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.condHeartBeat = sync.NewCond(&rf.mu)
 
-	syncIndexChan := make(chan int)
+	syncInfoChan := make(chan SyncInfo)
 
 	var serverID int
 	for serverID, _ = range rf.peers {
@@ -466,11 +472,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	for serverID, _ = range rf.peers {
 		if serverID != rf.me {
-			go rf.syncConsumer(serverID, syncIndexChan)
+			go rf.syncConsumer(serverID, syncInfoChan)
 		}
 	}
 
-	go rf.leaderCommitter(syncIndexChan)
+	go rf.leaderCommitter(syncInfoChan)
 	go rf.applier()
 
 	// initialize from state persisted before a crash
@@ -644,10 +650,18 @@ func (rf *Raft) applier() {
 }
 
 //commit leader's log if it is replicated in majority of peers
-func (rf *Raft) leaderCommitter(syncIndexChan chan int) {
+func (rf *Raft) leaderCommitter(syncInfoChan chan SyncInfo) {
 	replicatedNum := make([]int, 1, 1024)
+	syncInfoSet := make(map[SyncInfo]bool)
 	for {
-		syncIndex := <-syncIndexChan
+		syncInfo := <-syncInfoChan
+		_, ok := syncInfoSet[syncInfo]
+		if ok {
+			continue
+		} else {
+			syncInfoSet[syncInfo] = true
+		}
+		syncIndex := syncInfo.SyncIndex
 		func() {
 			rf.mu.Lock()
 			defer rf.mu.Unlock()
@@ -672,7 +686,7 @@ func (rf *Raft) leaderCommitter(syncIndexChan chan int) {
 }
 
 //sync logs to serverID
-func (rf *Raft) syncConsumer(serverID int, syncIndexChan chan int) {
+func (rf *Raft) syncConsumer(serverID int, syncInfoChan chan SyncInfo) {
 	fmt.Printf("start syncConsumer(%d) in %d\n", serverID, rf.me)
 
 	run := make(chan bool)
@@ -683,7 +697,7 @@ func (rf *Raft) syncConsumer(serverID int, syncIndexChan chan int) {
 			rf.mu.Lock()
 			oldLogLen := len(rf.log)
 			for !(oldLogLen < len(rf.log)) {
-				fmt.Printf("syncConsumer(%d) in %d:Waiting for cv\n", serverID, rf.me)
+				//fmt.Printf("syncConsumer(%d) in %d:Waiting for cv\n", serverID, rf.me)
 				rf.condAppStartLog.Wait()
 			}
 			select {
@@ -712,7 +726,7 @@ func (rf *Raft) syncConsumer(serverID int, syncIndexChan chan int) {
 		<-run
 		rf.mu.Lock()
 
-		fmt.Printf("syncConsumer(%d) in %d:run\n", serverID, rf.me)
+		//fmt.Printf("syncConsumer(%d) in %d:run\n", serverID, rf.me)
 		//app add log to raft.Start to sync log to followers
 		syncIndex := len(rf.log) - 1
 		role := rf.role
@@ -760,7 +774,7 @@ func (rf *Raft) syncConsumer(serverID int, syncIndexChan chan int) {
 			close(done)
 		case success := <-synced:
 			if success {
-				syncIndexChan <- syncIndex
+				syncInfoChan <- SyncInfo{serverID, syncIndex}
 			}
 		}
 	}
