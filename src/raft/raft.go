@@ -643,12 +643,9 @@ func (rf *Raft) leaderCommitter(syncIndexChan chan int) {
 			//syncIndex <= len(replicatedNum)-1
 			replicatedNum[syncIndex]++
 
-			if syncIndex != rf.lastCommitted+1 {
-				return
-			}
-			//syncIndex == rf.lastCommitted+1
-			if 2*replicatedNum[syncIndex] >= len(rf.peers) {
-				rf.lastCommitted++
+			//如果syncIndex已经可以commited了，对于所有index<syncIndex，index已经commited了
+			if 2*replicatedNum[syncIndex] >= len(rf.peers) && syncIndex > rf.lastCommitted {
+				rf.lastCommitted = syncIndex
 				rf.condCommitedIncre.Signal()
 				fmt.Printf("id=%d role=%d log %d commited\n", rf.me, rf.role, rf.lastCommitted)
 			}
