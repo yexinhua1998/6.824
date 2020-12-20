@@ -105,6 +105,8 @@ type Raft struct {
 	lastApplied int
 
 	condCommitedIncre *sync.Cond
+
+	condHeartBeat *sync.Cond //time to send heartbeat cv
 }
 
 //struct represent of a log entry
@@ -389,7 +391,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.condAppStartLog.Broadcast()
 	rf.mu.Unlock()
 
-	fmt.Printf("start a command.log = %s\n", toJSON(logEntry))
+	fmt.Printf("start a command.id=%d role=%d .log = %s\n", rf.me, rf.role, toJSON(logEntry))
 
 	return logSize, term, true
 }
@@ -450,13 +452,16 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.lastApplied = 0
 
+	rf.condHeartBeat = sync.NewCond(&rf.mu)
+
 	syncIndexChan := make(chan int)
 
 	var serverID int
 	for serverID, _ = range rf.peers {
 		rf.nextIndex[serverID] = 1
 	}
-	go rf.HeartBeatSender(100)
+	//go rf.HeartBeatSender(100)
+	go rf.HeartbeatTimer(100)
 	go rf.ElectionTimer()
 
 	for serverID, _ = range rf.peers {
@@ -472,6 +477,18 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.readPersist(persister.ReadRaftState())
 
 	return rf
+}
+
+func (rf *Raft) HeartbeatTimer(interval_ms int) {
+	for {
+		rf.mu.Lock()
+		//fmt.Printf("triger heart beat sender.role=%d,id=%d,term=%d\n",rf.role,rf.me,rf.term)
+		if rf.role == 2 {
+			rf.condHeartBeat.Broadcast()
+		}
+		rf.mu.Unlock()
+		time.Sleep(time.Duration(interval_ms) * time.Millisecond)
+	}
 }
 
 //because of this is parralel send heartbeat ,the time is controlable
@@ -657,15 +674,45 @@ func (rf *Raft) leaderCommitter(syncIndexChan chan int) {
 //sync logs to serverID
 func (rf *Raft) syncConsumer(serverID int, syncIndexChan chan int) {
 	fmt.Printf("start syncConsumer(%d) in %d\n", serverID, rf.me)
-	for {
-		rf.mu.Lock()
-		oldLogLen := len(rf.log)
-		for !(oldLogLen < len(rf.log)) {
-			fmt.Printf("syncConsumer(%d) in %d:Waiting for cv\n", serverID, rf.me)
-			rf.condAppStartLog.Wait()
-		}
-		fmt.Printf("syncConsumer(%d) in %d:run\n", serverID, rf.me)
 
+	run := make(chan bool)
+
+	//listen for Start()
+	go func() {
+		for {
+			rf.mu.Lock()
+			oldLogLen := len(rf.log)
+			for !(oldLogLen < len(rf.log)) {
+				fmt.Printf("syncConsumer(%d) in %d:Waiting for cv\n", serverID, rf.me)
+				rf.condAppStartLog.Wait()
+			}
+			select {
+			case run <- true:
+			default:
+			}
+			rf.mu.Unlock()
+		}
+	}()
+
+	//listen for heartbeat
+	go func() {
+		for {
+			rf.mu.Lock()
+			rf.condHeartBeat.Wait()
+			rf.mu.Unlock()
+			select {
+			case run <- true:
+			default:
+			}
+		}
+	}()
+
+	for {
+
+		<-run
+		rf.mu.Lock()
+
+		fmt.Printf("syncConsumer(%d) in %d:run\n", serverID, rf.me)
 		//app add log to raft.Start to sync log to followers
 		syncIndex := len(rf.log) - 1
 		role := rf.role
