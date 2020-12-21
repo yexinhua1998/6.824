@@ -291,6 +291,20 @@ func (rf *Raft) AppendEntries(req *AppendEntriesReq, rsp *AppendEntriesRsp) {
 	if logSize > req.PrevLogIndex && rf.log[req.PrevLogIndex].Term == req.PrevLogTerm {
 		rf.log = append(rf.log[:req.PrevLogIndex+1], req.Entries...)
 		rsp.Success = true
+
+		//incr commit
+		logSize = len(rf.log)
+		haveCommitedIncrement := false
+		for logSize-1 > rf.lastCommitted && req.LeaderCommit > rf.lastCommitted {
+			rf.lastCommitted++
+			haveCommitedIncrement = true
+			fmt.Printf("id=%d role=%d log %d commited\n", rf.me, rf.role, rf.lastCommitted)
+		}
+
+		if haveCommitedIncrement {
+			//notify applyer to apply command to application
+			rf.condCommitedIncre.Signal()
+		}
 	}
 	/*
 		// old code
@@ -310,19 +324,6 @@ func (rf *Raft) AppendEntries(req *AppendEntriesReq, rsp *AppendEntriesRsp) {
 			//leader's log entries cannot append to follower's log
 			//wait for next append entries rpc
 		}*/
-
-	logSize = len(rf.log)
-	haveCommitedIncrement := false
-	for logSize-1 > rf.lastCommitted && req.LeaderCommit > rf.lastCommitted {
-		rf.lastCommitted++
-		haveCommitedIncrement = true
-		fmt.Printf("id=%d role=%d log %d commited\n", rf.me, rf.role, rf.lastCommitted)
-	}
-
-	if haveCommitedIncrement {
-		//notify applyer to apply command to application
-		rf.condCommitedIncre.Signal()
-	}
 
 	fmt.Printf("AppendEntries:role=%d,id=%d,rsp=%v\n", rf.role, rf.me, toJSON(rsp))
 
@@ -545,6 +546,7 @@ func (rf *Raft) ElectionTimer() {
 			//follower and election time out
 			rf.role = 1 //candidate
 			rf.term++
+			rf.votedFor = -1
 			go rf.TryToBecomeLeader()
 		}
 		rf.recvHeartBeat = false
