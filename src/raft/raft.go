@@ -266,12 +266,12 @@ func (rf *Raft) AppendEntries(req *AppendEntriesReq, rsp *AppendEntriesRsp) {
 	fmt.Printf("AppendEntries:role=%d,id=%d,req=%s\n", rf.role, rf.me, toJSON(req))
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	fmt.Printf("")
+	fmt.Printf("get lock")
 	rf.recvHeartBeat = true
 	rsp.Success = false
 	rsp.Term = rf.term
 
-	if req.Term >= rf.term {
+	if req.Term > rf.term || (req.Term == rf.term && rf.role != 2 /*candidate*/) {
 		oldRole := rf.role
 		oldTerm := rf.term
 		rf.role = 0 //follower
@@ -282,7 +282,7 @@ func (rf *Raft) AppendEntries(req *AppendEntriesReq, rsp *AppendEntriesRsp) {
 		if rf.term > oldTerm {
 			rf.votedFor = -1 //mean null
 		}
-	} else {
+	} else if req.Term < rf.term || rf.role == 2 {
 		return
 	}
 
@@ -605,7 +605,9 @@ func (rf *Raft) TryToBecomeLeader() {
 		if !isTimeOut {
 			rf.role = 2 //leader
 			for serverID, _ := range rf.peers {
+				rf.mu.Lock()
 				rf.nextIndex[serverID] = len(rf.log)
+				rf.mu.Unlock()
 			}
 			isExitLoop = true
 		} else if rf.role == 0 {
@@ -850,6 +852,9 @@ func (rf *Raft) syncEntries2Follower(serverID int, done chan int) bool {
 		default:
 		}
 		nextIndex := rf.nextIndex[serverID]
+		/*rf.mu.Lock()
+		fmt.Printf("id=%d role=%d nextIndex=%d id=%d\n", rf.me, rf.role, nextIndex, serverID)
+		rf.mu.Unlock()*/
 		prevLog := rf.log[nextIndex-1]
 		req := AppendEntriesReq{rf.me, rf.term, prevLog.LogIndex, prevLog.Term, rf.log[nextIndex:], rf.lastCommitted, "sync"}
 		rsp := AppendEntriesRsp{}
@@ -865,7 +870,9 @@ func (rf *Raft) syncEntries2Follower(serverID int, done chan int) bool {
 		}
 		rf.mu.Unlock()
 		if rsp.Success {
+			rf.mu.Lock()
 			rf.nextIndex[serverID] = len(rf.log)
+			rf.mu.Unlock()
 			return true
 		} else {
 			if rf.nextIndex[serverID] > 1 {
