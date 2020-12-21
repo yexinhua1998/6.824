@@ -855,6 +855,13 @@ func (rf *Raft) syncEntries2Follower(serverID int, done chan int) bool {
 		if !ok {
 			return false
 		}
+		rf.mu.Lock()
+		if rsp.Term > rf.term {
+			rf.term = rsp.Term
+			rf.role = 0
+			rf.condRoleChanged.Broadcast()
+		}
+		rf.mu.Unlock()
 		if rsp.Success {
 			rf.nextIndex[serverID] = len(rf.log)
 			return true
