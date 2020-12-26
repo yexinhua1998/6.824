@@ -43,7 +43,7 @@ package raft
 //
 
 import (
-	"fmt"
+	"log"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -135,7 +135,7 @@ func (rf *Raft) GetState() (int, bool) {
 	term = int(rf.term)
 	isleader = rf.role == 2 //is leader
 
-	fmt.Printf("GetState():role=%d term=%d isleader=%v\n", rf.role, term, isleader)
+	DPrintf("GetState():role=%d term=%d isleader=%v\n", rf.role, term, isleader)
 	return term, isleader
 }
 
@@ -205,7 +205,9 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 
+	DPrintf("id=%d request vote :try to lock\n", rf.me)
 	rf.mu.Lock()
+	DPrintf("id=%d request vote :get lock\n", rf.me)
 	defer rf.mu.Unlock()
 	reply.FollowerTerm = rf.term
 	reply.VoteGranted = false
@@ -220,7 +222,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.condRoleChanged.Broadcast()
 	}
 	lastLog := rf.log[len(rf.log)-1]
-	if rf.votedFor == args.CandidateId || args.LastLogTerm > lastLog.Term || (args.LastLogTerm == lastLog.Term && args.LastLogIndex >= lastLog.LogIndex) {
+	if (rf.votedFor == args.CandidateId || rf.votedFor == -1) && (args.LastLogTerm > lastLog.Term || (args.LastLogTerm == lastLog.Term && args.LastLogIndex >= lastLog.LogIndex)) {
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
 		rf.recvHeartBeat = true
@@ -239,7 +241,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		}
 	}*/
 
-	fmt.Printf("RequestVote,id=%d,role=%d,req=%s,rsp=%s\n", rf.me, rf.role, toJSON(args), toJSON(reply))
+	DPrintf("RequestVote,id=%d,role=%d,req=%s,rsp=%s\n", rf.me, rf.role, toJSON(args), toJSON(reply))
 }
 
 //-----------------implement AppendEntries Service--------------------
@@ -263,10 +265,10 @@ type AppendEntriesRsp struct {
 //2A: implements heartbeats only
 
 func (rf *Raft) AppendEntries(req *AppendEntriesReq, rsp *AppendEntriesRsp) {
-	fmt.Printf("AppendEntries:role=%d,id=%d,req=%s\n", rf.role, rf.me, toJSON(req))
+	DPrintf("AppendEntries:role=%d,id=%d,req=%s\n", rf.role, rf.me, toJSON(req))
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	fmt.Printf("get lock")
+	DPrintf("get lock")
 	rf.recvHeartBeat = true
 	rsp.Success = false
 	rsp.Term = rf.term
@@ -287,7 +289,7 @@ func (rf *Raft) AppendEntries(req *AppendEntriesReq, rsp *AppendEntriesRsp) {
 	}
 
 	logSize := len(rf.log)
-	fmt.Printf("id=%d role=%d term=%d log=%s\n", rf.me, rf.role, rf.term, toJSON(rf.log))
+	DPrintf("id=%d role=%d term=%d log=%s\n", rf.me, rf.role, rf.term, toJSON(rf.log))
 	if logSize > req.PrevLogIndex && rf.log[req.PrevLogIndex].Term == req.PrevLogTerm {
 		rf.log = append(rf.log[:req.PrevLogIndex+1], req.Entries...)
 		rsp.Success = true
@@ -298,12 +300,12 @@ func (rf *Raft) AppendEntries(req *AppendEntriesReq, rsp *AppendEntriesRsp) {
 		for logSize-1 > rf.lastCommitted && req.LeaderCommit > rf.lastCommitted {
 			rf.lastCommitted++
 			haveCommitedIncrement = true
-			fmt.Printf("id=%d role=%d log %d commited\n", rf.me, rf.role, rf.lastCommitted)
+			DPrintf("id=%d role=%d log %d commited\n", rf.me, rf.role, rf.lastCommitted)
 		}
 
 		if haveCommitedIncrement {
 			//notify applyer to apply command to application
-			rf.condCommitedIncre.Signal()
+			rf.condCommitedIncre.Broadcast()
 		}
 	}
 	/*
@@ -325,7 +327,7 @@ func (rf *Raft) AppendEntries(req *AppendEntriesReq, rsp *AppendEntriesRsp) {
 			//wait for next append entries rpc
 		}*/
 
-	fmt.Printf("AppendEntries:role=%d,id=%d,rsp=%v\n", rf.role, rf.me, toJSON(rsp))
+	DPrintf("AppendEntries:role=%d,id=%d,rsp=%v\n", rf.role, rf.me, toJSON(rsp))
 
 }
 
@@ -362,11 +364,13 @@ func (rf *Raft) AppendEntries(req *AppendEntriesReq, rsp *AppendEntriesRsp) {
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	//DPrintf("src=%d dest=%d ok=%v req=%s rsp=%s\n", rf.me, server, ok, toJSON(args), toJSON(reply))
 	return ok
 }
 
 func (rf *Raft) sendAppendEntries(server int, req *AppendEntriesReq, rsp *AppendEntriesRsp) bool {
 	ok := rf.peers[server].Call("Raft.AppendEntries", req, rsp)
+	//DPrintf("src=%d dest=%d ok=%v req=%s rsp=%s\n", rf.me, server, ok, toJSON(req), toJSON(rsp))
 	return ok
 }
 
@@ -387,20 +391,52 @@ func (rf *Raft) sendAppendEntries(server int, req *AppendEntriesReq, rsp *Append
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
 	rf.mu.Lock()
+	DPrintf("Start():peers num = %d\n", len(rf.peers))
 	if rf.role != 2 {
 		rf.mu.Unlock()
 		return -1, -1, false
 	}
 	term := rf.term
-	logSize := len(rf.log)
-	logEntry := LogEntry{rf.term, logSize, command}
+	logIndex := len(rf.log)
+	logEntry := LogEntry{rf.term, logIndex, command}
 	rf.log = append(rf.log, logEntry)
 	rf.condAppStartLog.Broadcast()
 	rf.mu.Unlock()
 
-	fmt.Printf("start a command.id=%d role=%d .log = %s\n", rf.me, rf.role, toJSON(logEntry))
+	commitChan := make(chan bool)
+	go func() {
+		rf.mu.Lock()
+		for rf.lastCommitted < logIndex {
+			rf.condCommitedIncre.Wait()
+		}
+		//rf.lastCommited == logIndex
+		rf.mu.Unlock()
+		select {
+		case commitChan <- true:
+		default:
+		}
+	}()
 
-	return logSize, term, true
+	timeoutChan := make(chan bool)
+	go func() {
+		time.Sleep(time.Duration(1000) * time.Millisecond)
+		select {
+		case timeoutChan <- true:
+		default:
+		}
+	}()
+
+	select {
+	case <-commitChan:
+		DPrintf("start a command.id=%d role=%d .log = %s\n", rf.me, rf.role, toJSON(logEntry))
+		return logIndex, term, true
+	case <-timeoutChan: //timeout.rollback
+		rf.mu.Lock()
+		rf.log = rf.log[:logIndex]
+		rf.mu.Unlock()
+		return -1, term, true
+	}
+
 }
 
 //
@@ -442,7 +478,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 
+	log.SetFlags(log.Lmicroseconds)
+
 	// Your initialization code here (2A, 2B, 2C).
+	DPrintf("peers=%s\n", toJSON(peers))
 	rf.role = 0
 	rf.term = 0
 	rf.recvHeartBeat = false
@@ -461,7 +500,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.condHeartBeat = sync.NewCond(&rf.mu)
 
-	syncInfoChan := make(chan SyncInfo)
+	syncInfoChan := make(chan SyncInfo, 1024)
 
 	var serverID int
 	for serverID, _ = range rf.peers {
@@ -489,7 +528,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 func (rf *Raft) HeartbeatTimer(interval_ms int) {
 	for {
 		rf.mu.Lock()
-		//fmt.Printf("triger heart beat sender.role=%d,id=%d,term=%d\n",rf.role,rf.me,rf.term)
+		//DPrintf("triger heart beat sender.role=%d,id=%d,term=%d\n",rf.role,rf.me,rf.term)
 		if rf.role == 2 {
 			rf.condHeartBeat.Broadcast()
 		}
@@ -515,7 +554,7 @@ func (rf *Raft) HeartBeatSender(interval_ms int) {
 	for {
 
 		rf.mu.Lock()
-		//fmt.Printf("triger heart beat sender.role=%d,id=%d,term=%d\n",rf.role,rf.me,rf.term)
+		//DPrintf("triger heart beat sender.role=%d,id=%d,term=%d\n",rf.role,rf.me,rf.term)
 		if rf.role == 2 {
 			rf.BroadcastHeartBeat()
 		}
@@ -542,16 +581,147 @@ func (rf *Raft) ElectionTimer() {
 		time.Sleep(time.Duration(electionTimeOut) * time.Millisecond)
 
 		rf.mu.Lock()
+		//DPrintf("id=%d role=%d recvheartbeat=%v\n", rf.me, rf.role, rf.recvHeartBeat)
 		if !rf.recvHeartBeat && rf.role == 0 {
 			//follower and election time out
 			rf.role = 1 //candidate
 			rf.term++
-			rf.votedFor = -1
-			go rf.TryToBecomeLeader()
+			rf.votedFor = rf.me
+			rf.mu.Unlock()
+			rf.TryToBecomeLeader2()
+			rf.mu.Lock()
 		}
 		rf.recvHeartBeat = false
 		rf.mu.Unlock()
 
+	}
+}
+
+//function that while peer become candidate been called
+func (rf *Raft) TryToBecomeLeader2() {
+	DPrintf("id=%d call TryToBecomeLeader2\n", rf.me)
+	for {
+		DPrintf("id=%d new for\n", rf.me)
+
+		rf.mu.Lock()
+		serverNum := len(rf.peers)
+		term := rf.term
+		rf.mu.Unlock()
+
+		var okNum = 1 //one is the vote from yourself
+		var notGrantNum = 0
+
+		var timeoutChan = make(chan bool)
+		var becomeFollowerChan = make(chan int)
+		//0 means signal from appendentreis.else is rf.term < rsp.Term
+		var voteChan = make(chan bool)
+		var done = make(chan bool)
+
+		//listen for timeout
+		go func(timeout_ms int) {
+			time.Sleep(time.Duration(timeout_ms) * time.Millisecond)
+			select {
+			case timeoutChan <- true:
+			case <-done:
+			}
+		}(GenRandomInt(300, 500))
+
+		//listen for role become follower
+		go func() {
+			rf.mu.Lock()
+			for rf.role != 0 {
+				rf.condRoleChanged.Wait()
+			}
+			rf.mu.Unlock()
+			//rf.role == 0
+			select {
+			case becomeFollowerChan <- 0:
+			case <-done:
+			}
+		}()
+
+		for i := 0; i < serverNum; i++ {
+			if i != rf.me {
+				go func(serverId int) {
+					for {
+						var rsp RequestVoteReply
+						lastLog := rf.log[len(rf.log)-1]
+						req := RequestVoteArgs{term, rf.me, lastLog.LogIndex, lastLog.Term}
+						ok := rf.sendRequestVote(serverId, &req, &rsp)
+						select {
+						case <-done:
+							return
+						default:
+						}
+						//DPrintf("src=%d dest=%d ok=%v req=%s rsp=%s\n", rf.me, serverId, ok, toJSON(req), toJSON(rsp))
+						if ok {
+							select {
+							case voteChan <- rsp.VoteGranted:
+							case <-done:
+							}
+							if rsp.FollowerTerm > term {
+								select {
+								case becomeFollowerChan <- rsp.FollowerTerm:
+								case <-done:
+								}
+							}
+						} else {
+							DPrintf("src=%d dest=%d request vote failed\n", rf.me, serverId)
+							time.Sleep(time.Duration(100) * time.Millisecond)
+							continue
+						}
+					}
+				}(i)
+			}
+		}
+
+		for {
+			select {
+			case voted := <-voteChan:
+				DPrintf("branch 1\n")
+				if voted {
+					okNum++
+					if serverNum <= 2*okNum {
+						DPrintf("branch 11\n")
+						rf.mu.Lock()
+						rf.role = 2 //leader
+						DPrintf("id=%d become leader\n", rf.me)
+						for serverID, _ := range rf.peers {
+							rf.nextIndex[serverID] = len(rf.log)
+						}
+						rf.mu.Unlock()
+						close(done)
+						return
+					}
+				} else {
+					notGrantNum++
+					if serverNum <= 2*notGrantNum {
+						DPrintf("branch 12\n")
+						<-timeoutChan
+						rf.mu.Lock()
+						rf.term++
+						rf.votedFor = -1
+						rf.mu.Unlock()
+						close(done)
+						goto NEW_ELECTION
+					}
+				}
+
+			case term := <-becomeFollowerChan:
+				DPrintf("branch 2\n")
+				rf.mu.Lock()
+				rf.role = 0
+				if term > rf.term {
+					rf.term = term
+					rf.votedFor = -1
+				}
+				rf.mu.Unlock()
+				close(done)
+				return
+			}
+		}
+
+	NEW_ELECTION:
 	}
 }
 
@@ -566,29 +736,63 @@ func (rf *Raft) TryToBecomeLeader() {
 		var mutex sync.Mutex //access timeOut,okNum
 		var isTimeOut = false
 		var okNum = 1 //one is the vote from yourself
+		var notGrantNum = 0
+		var becomeFollower = false
+		var maxTerm = term
 		var cond = sync.NewCond(&mutex)
+		var timeoutChan = make(chan bool)
 
 		//listen for timeout
 		go func(timeout_ms int) {
 			time.Sleep(time.Duration(timeout_ms) * time.Millisecond)
-			mutex.Lock()
+			//mutex.Lock()
 			isTimeOut = true
-			mutex.Unlock()
-			cond.Signal()
+			//mutex.Unlock()
+			//cond.Signal()
+			timeoutChan <- true
 		}(GenRandomInt(300, 500))
+
+		//listen for role become follower
+		go func() {
+			rf.mu.Lock()
+			for rf.role != 0 {
+				rf.condRoleChanged.Wait()
+			}
+			//rf.role == 0
+			mutex.Lock()
+			becomeFollower = true
+			cond.Signal()
+			mutex.Unlock()
+			rf.mu.Unlock()
+		}()
 
 		for i := 0; i < serverNum; i++ {
 			if i != rf.me {
 				go func(serverId int) {
-					var rsp RequestVoteReply
-					lastLog := rf.log[len(rf.log)-1]
-					req := RequestVoteArgs{term, rf.me, lastLog.LogIndex, lastLog.Term}
-					ok := rf.sendRequestVote(serverId, &req, &rsp)
-					if ok && rsp.VoteGranted {
-						mutex.Lock()
-						okNum++
-						mutex.Unlock()
-						cond.Signal()
+					for {
+						var rsp RequestVoteReply
+						lastLog := rf.log[len(rf.log)-1]
+						req := RequestVoteArgs{term, rf.me, lastLog.LogIndex, lastLog.Term}
+						ok := rf.sendRequestVote(serverId, &req, &rsp)
+						//DPrintf("src=%d dest=%d ok=%v req=%s rsp=%s\n", rf.me, serverId, ok, toJSON(req), toJSON(rsp))
+						if ok {
+							mutex.Lock()
+							if rsp.VoteGranted {
+								//DPrintf("oknum++\n")
+								okNum++
+							} else {
+								notGrantNum++
+								if rsp.FollowerTerm > term {
+									becomeFollower = true
+									maxTerm = rsp.FollowerTerm
+								}
+							}
+							mutex.Unlock()
+							cond.Signal()
+							break
+						} else {
+							continue
+						}
 					}
 				}(i)
 			}
@@ -596,13 +800,16 @@ func (rf *Raft) TryToBecomeLeader() {
 
 		mutex.Lock()
 		//because of cond.Wait will release the lock,lock will not be locked for a long time
-		for !((serverNum <= 2*okNum) || isTimeOut) {
+		for !((serverNum <= 2*okNum) || (serverNum <= 2*notGrantNum) || becomeFollower) {
 			cond.Wait()
 		}
 
 		var isExitLoop = false
+		rf.mu.Lock()
+		DPrintf("id=%d role=%d c1=%v oknum=%d server_num=%d len(peers)=%d c2=%v c3=%v\n", rf.me, rf.role, serverNum <= 2*okNum, okNum, serverNum, len(rf.peers), isTimeOut, becomeFollower)
+		rf.mu.Unlock()
 
-		if !isTimeOut {
+		if serverNum <= 2*okNum {
 			rf.role = 2 //leader
 			for serverID, _ := range rf.peers {
 				rf.mu.Lock()
@@ -610,10 +817,21 @@ func (rf *Raft) TryToBecomeLeader() {
 				rf.mu.Unlock()
 			}
 			isExitLoop = true
-		} else if rf.role == 0 {
+		} else if becomeFollower {
+			rf.mu.Lock()
+			rf.role = 0
+			if maxTerm > rf.term {
+				rf.term = maxTerm
+				rf.votedFor = -1
+			}
+			rf.mu.Unlock()
 			isExitLoop = true
-		} else {
+		} else { //(serverNum <= 2*notGrantNum)
+			<-timeoutChan
+			rf.mu.Lock()
 			rf.term++
+			rf.votedFor = -1
+			rf.mu.Unlock()
 		}
 
 		mutex.Unlock()
@@ -647,7 +865,7 @@ func (rf *Raft) applier() {
 		//rf.lastCommitted > rf.lastApplied
 		commandIndex := rf.lastApplied + 1
 		rf.applyCh <- ApplyMsg{true, rf.log[commandIndex].Command, commandIndex}
-		fmt.Printf("id=%d role=%d log %d applied\n", rf.me, rf.role, commandIndex)
+		DPrintf("id=%d role=%d log %d applied\n", rf.me, rf.role, commandIndex)
 		rf.lastApplied++
 		rf.mu.Unlock()
 	}
@@ -681,8 +899,9 @@ func (rf *Raft) leaderCommitter(syncInfoChan chan SyncInfo) {
 			//如果syncIndex已经可以commited了，对于所有index<syncIndex，index已经commited了
 			if 2*replicatedNum[syncIndex] >= len(rf.peers) && syncIndex > rf.lastCommitted {
 				rf.lastCommitted = syncIndex
-				rf.condCommitedIncre.Signal()
-				fmt.Printf("id=%d role=%d log %d commited\n", rf.me, rf.role, rf.lastCommitted)
+				rf.condCommitedIncre.Broadcast()
+				rf.condHeartBeat.Broadcast()
+				DPrintf("id=%d role=%d log %d commited\n", rf.me, rf.role, rf.lastCommitted)
 			}
 		}()
 
@@ -691,7 +910,7 @@ func (rf *Raft) leaderCommitter(syncInfoChan chan SyncInfo) {
 
 //sync logs to serverID
 func (rf *Raft) syncConsumer(serverID int, syncInfoChan chan SyncInfo) {
-	fmt.Printf("start syncConsumer(%d) in %d\n", serverID, rf.me)
+	DPrintf("start syncConsumer(%d) in %d\n", serverID, rf.me)
 
 	run := make(chan bool)
 
@@ -701,7 +920,7 @@ func (rf *Raft) syncConsumer(serverID int, syncInfoChan chan SyncInfo) {
 			rf.mu.Lock()
 			oldLogLen := len(rf.log)
 			for !(oldLogLen < len(rf.log)) {
-				//fmt.Printf("syncConsumer(%d) in %d:Waiting for cv\n", serverID, rf.me)
+				//DPrintf("syncConsumer(%d) in %d:Waiting for cv\n", serverID, rf.me)
 				rf.condAppStartLog.Wait()
 			}
 			select {
@@ -718,6 +937,7 @@ func (rf *Raft) syncConsumer(serverID int, syncInfoChan chan SyncInfo) {
 			rf.mu.Lock()
 			rf.condHeartBeat.Wait()
 			rf.mu.Unlock()
+			//DPrintf("go heartbeat\n")
 			select {
 			case run <- true:
 			default:
@@ -729,8 +949,9 @@ func (rf *Raft) syncConsumer(serverID int, syncInfoChan chan SyncInfo) {
 
 		<-run
 		rf.mu.Lock()
+		DPrintf("id=%d run syncconsumer\n", rf.me)
 
-		//fmt.Printf("syncConsumer(%d) in %d:run\n", serverID, rf.me)
+		//DPrintf("syncConsumer(%d) in %d:run\n", serverID, rf.me)
 		//app add log to raft.Start to sync log to followers
 		syncIndex := len(rf.log) - 1
 		role := rf.role
@@ -755,13 +976,13 @@ func (rf *Raft) syncConsumer(serverID int, syncInfoChan chan SyncInfo) {
 				rf.condRoleChanged.Wait()
 			}
 			//rf.role != 2
-			//fmt.Printf("id=%d role=%d write to roleBecomeNotLeader\n", rf.me, rf.role)
+			//DPrintf("id=%d role=%d write to roleBecomeNotLeader\n", rf.me, rf.role)
 			select {
 			case roleBecomeNotLeader <- 0:
-				//fmt.Printf("id=%d role=%d write to roleBecomeNotLeader done\n", rf.me, rf.role)
+				//DPrintf("id=%d role=%d write to roleBecomeNotLeader done\n", rf.me, rf.role)
 
 			default:
-				//fmt.Printf("id=%d role=%d cannot write to roleBecomeNotLeader\n", rf.me, rf.role)
+				//DPrintf("id=%d role=%d cannot write to roleBecomeNotLeader\n", rf.me, rf.role)
 
 			}
 
@@ -773,14 +994,18 @@ func (rf *Raft) syncConsumer(serverID int, syncInfoChan chan SyncInfo) {
 			synced <- success
 		}()
 
+		DPrintf("id=%d run syncconsumer(%d):waiting for select\n", rf.me, serverID)
 		select {
 		case <-roleBecomeNotLeader:
+			DPrintf("id=%d run syncconsumer(%d):role become not leader\n", rf.me, serverID)
 			close(done)
 		case success := <-synced:
+			DPrintf("id=%d run syncconsumer(%d):success\n", rf.me, serverID)
 			if success {
 				syncInfoChan <- SyncInfo{serverID, syncIndex}
 			}
 		}
+		DPrintf("id=%d run syncconsumer(%d):select done\n", rf.me, serverID)
 	}
 }
 
@@ -853,14 +1078,19 @@ func (rf *Raft) syncEntries2Follower(serverID int, done chan int) bool {
 		}
 		nextIndex := rf.nextIndex[serverID]
 		/*rf.mu.Lock()
-		fmt.Printf("id=%d role=%d nextIndex=%d id=%d\n", rf.me, rf.role, nextIndex, serverID)
+		DPrintf("id=%d role=%d nextIndex=%d id=%d\n", rf.me, rf.role, nextIndex, serverID)
 		rf.mu.Unlock()*/
+		rf.mu.Lock()
 		prevLog := rf.log[nextIndex-1]
 		req := AppendEntriesReq{rf.me, rf.term, prevLog.LogIndex, prevLog.Term, rf.log[nextIndex:], rf.lastCommitted, "sync"}
 		rsp := AppendEntriesRsp{}
 		ok := rf.sendAppendEntries(serverID, &req, &rsp)
+		logSize := len(rf.log)
+		rf.mu.Unlock()
 		if !ok {
-			return false
+			DPrintf("src=%d role=%d dest=%d appendentries fail\n", rf.me, rf.role, serverID)
+			time.Sleep(time.Duration(100) * time.Millisecond)
+			continue
 		}
 		rf.mu.Lock()
 		if rsp.Term > rf.term {
@@ -870,9 +1100,7 @@ func (rf *Raft) syncEntries2Follower(serverID int, done chan int) bool {
 		}
 		rf.mu.Unlock()
 		if rsp.Success {
-			rf.mu.Lock()
-			rf.nextIndex[serverID] = len(rf.log)
-			rf.mu.Unlock()
+			rf.nextIndex[serverID] = logSize
 			return true
 		} else {
 			if rf.nextIndex[serverID] > 1 {
