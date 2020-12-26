@@ -580,6 +580,7 @@ func (rf *Raft) TryToBecomeLeader() {
 		rf.mu.Lock()
 		serverNum := len(rf.peers)
 		term := rf.term
+		rf.votedFor = rf.me
 		rf.mu.Unlock()
 
 		var mutex sync.Mutex //access timeOut,okNum
