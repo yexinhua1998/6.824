@@ -220,7 +220,22 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.condRoleChanged.Broadcast()
 	}
 	lastLog := rf.log[len(rf.log)-1]
-	if rf.votedFor == args.CandidateId || args.LastLogTerm > lastLog.Term || (args.LastLogTerm == lastLog.Term && args.LastLogIndex >= lastLog.LogIndex) {
+
+	var vote = false
+
+	if rf.term == args.CandidateTerm {
+		if rf.votedFor == args.CandidateId {
+			vote = true
+		} else if rf.votedFor == -1 {
+			if args.LastLogTerm > lastLog.Term {
+				vote = true
+			} else if args.LastLogTerm == lastLog.Term && args.LastLogIndex >= lastLog.LogIndex {
+				vote = true
+			}
+		}
+	}
+
+	if vote {
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
 		rf.recvHeartBeat = true
