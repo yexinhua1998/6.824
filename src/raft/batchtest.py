@@ -1,7 +1,7 @@
 import os 
 
 err_num = 0
-batch_size = 2
+batch_size = 10
 
 for i in range(batch_size):
     os.system('go test -run 2B > /tmp/lab2b')

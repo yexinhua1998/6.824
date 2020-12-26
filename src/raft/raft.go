@@ -278,15 +278,18 @@ type AppendEntriesRsp struct {
 //2A: implements heartbeats only
 
 func (rf *Raft) AppendEntries(req *AppendEntriesReq, rsp *AppendEntriesRsp) {
-	fmt.Printf("AppendEntries:role=%d,id=%d,req=%s\n", rf.role, rf.me, toJSON(req))
+	//fmt.Printf("AppendEntries:role=%d,id=%d,term=%d,req=%s\n", rf.role, rf.me, rf.term, toJSON(req))
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	fmt.Printf("get lock")
+	//fmt.Printf("get lock\n")
 	rf.recvHeartBeat = true
 	rsp.Success = false
 	rsp.Term = rf.term
 
-	if req.Term > rf.term || (req.Term == rf.term && rf.role != 2 /*candidate*/) {
+	fmt.Printf("AppendEntries:role=%d,id=%d,term=%d,req=%s\n", rf.role, rf.me, rf.term, toJSON(req))
+
+	if req.Term > rf.term || (req.Term == rf.term && rf.role != 2 /*is candidate*/) {
+		fmt.Printf("branch1\n")
 		oldRole := rf.role
 		oldTerm := rf.term
 		rf.role = 0 //follower
@@ -298,6 +301,7 @@ func (rf *Raft) AppendEntries(req *AppendEntriesReq, rsp *AppendEntriesRsp) {
 			rf.votedFor = -1 //mean null
 		}
 	} else if req.Term < rf.term || rf.role == 2 {
+		fmt.Printf("branch2\n")
 		return
 	}
 
@@ -882,6 +886,8 @@ func (rf *Raft) syncEntries2Follower(serverID int, done chan int) bool {
 			rf.term = rsp.Term
 			rf.role = 0
 			rf.condRoleChanged.Broadcast()
+			rf.mu.Unlock()
+			return false
 		}
 		rf.mu.Unlock()
 		if rsp.Success {
