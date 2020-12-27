@@ -624,6 +624,7 @@ func (rf *Raft) TryToBecomeLeader() {
 
 		if !isTimeOut {
 			rf.role = 2 //leader
+			fmt.Printf("id=%d peers_num=%d become leader.", rf.me, len(rf.peers))
 			for serverID, _ := range rf.peers {
 				rf.mu.Lock()
 				rf.nextIndex[serverID] = len(rf.log)
@@ -634,6 +635,7 @@ func (rf *Raft) TryToBecomeLeader() {
 			isExitLoop = true
 		} else {
 			rf.term++
+			rf.votedFor = rf.me
 		}
 
 		mutex.Unlock()
@@ -801,66 +803,6 @@ func (rf *Raft) syncConsumer(serverID int, syncInfoChan chan SyncInfo) {
 				syncInfoChan <- SyncInfo{serverID, syncIndex}
 			}
 		}
-	}
-}
-
-//sync leader's entries to followers
-func (rf *Raft) syncEntries2Followers(commited chan bool) {
-
-	var okNum = 1 //one is log in yourself
-	var failNum = 0
-	var done = make(chan int)
-	var syncResult = make(chan bool)
-	var becomeFollower = make(chan bool)
-
-	for serverID, _ := range rf.peers {
-		if serverID != rf.me {
-			go func(serverID int) {
-				//call syncEntries2Follower parallely and send the signal to father goroutine
-				success := rf.syncEntries2Follower(serverID, done)
-				syncResult <- success
-			}(serverID)
-		}
-	}
-
-	//listen for role changed
-	go func() {
-		rf.mu.Lock()
-		for rf.role == 2 {
-			rf.condRoleChanged.Wait()
-			select {
-			case <-done: //father goroutine is left
-				return
-			default:
-				continue
-			}
-		}
-		becomeFollower <- true
-		rf.mu.Unlock()
-	}()
-
-	select {
-
-	case success := <-syncResult:
-		if success {
-			okNum++
-			if 2*okNum >= len(rf.peers) {
-				//log replicated to majority of peers
-				commited <- true
-				close(done)
-			}
-		} else {
-			failNum++
-			if 2*failNum >= len(rf.peers) {
-				commited <- false
-				close(done)
-			}
-		}
-
-	case <-becomeFollower:
-		commited <- false
-		return
-
 	}
 }
 
