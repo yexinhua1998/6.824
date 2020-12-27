@@ -405,6 +405,10 @@ func (rf *Raft) sendAppendEntries(server int, req *AppendEntriesReq, rsp *Append
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
+	rf.condHeartBeat.Broadcast()
+	//if it is rejoin leader,it's term is lower than new leader
+	//by this way,rejoin leader can recv append entris rsp from new leader
+	//and become follower
 	rf.mu.Lock()
 	if rf.role != 2 {
 		rf.mu.Unlock()
