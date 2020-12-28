@@ -215,6 +215,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	//__STOP_AT_HERE__
 	//fix
 
+	nowMs := int(time.Now().UnixNano() / 1e6)
+	if nowMs < rf.msLastAppendEntries+300 {
+		return
+	}
+
 	if args.CandidateTerm > rf.term {
 		//switch to follower
 		rf.term = args.CandidateTerm
