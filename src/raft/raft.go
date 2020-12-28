@@ -107,6 +107,9 @@ type Raft struct {
 	condCommitedIncre *sync.Cond
 
 	condHeartBeat *sync.Cond //time to send heartbeat cv
+
+	msLastAppendEntries int
+	leaderID            int
 }
 
 //struct represent of a log entry
@@ -287,6 +290,16 @@ func (rf *Raft) AppendEntries(req *AppendEntriesReq, rsp *AppendEntriesRsp) {
 	rsp.Term = rf.term
 
 	fmt.Printf("AppendEntries:role=%d,id=%d,term=%d,req=%s\n", rf.role, rf.me, rf.term, toJSON(req))
+
+	nowMs := int(time.Now().UnixNano() / 1e6)
+	if nowMs < rf.msLastAppendEntries+300 {
+		if req.LeaderID != rf.leaderID {
+			return
+		}
+	} else {
+		rf.leaderID = req.LeaderID
+	}
+	rf.msLastAppendEntries = nowMs
 
 	if req.Term > rf.term || (req.Term == rf.term && rf.role != 2 /*is candidate*/) {
 		fmt.Printf("branch1\n")
