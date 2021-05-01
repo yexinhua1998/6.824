@@ -43,7 +43,6 @@ package raft
 //
 
 import (
-	"fmt"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -53,6 +52,10 @@ import (
 	"encoding/json"
 
 	"../labrpc"
+
+	"bytes"
+
+	"../labgob"
 )
 
 // import "bytes"
@@ -138,7 +141,7 @@ func (rf *Raft) GetState() (int, bool) {
 	term = int(rf.term)
 	isleader = rf.role == 2 //is leader
 
-	fmt.Printf("GetState():role=%d term=%d isleader=%v\n", rf.role, term, isleader)
+	DPrintf("GetState():role=%d term=%d isleader=%v\n", rf.role, term, isleader)
 	return term, isleader
 }
 
@@ -156,6 +159,16 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+
+	DPrintf("persist\n")
+
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.term)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -178,6 +191,23 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+
+	DPrintf("readPersist\n")
+
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var term int
+	var votedFor int
+	var log []LogEntry
+	if d.Decode(&term) != nil ||
+		d.Decode(&votedFor) != nil ||
+		d.Decode(&log) != nil {
+		// error...
+	} else {
+		rf.term = term
+		rf.votedFor = votedFor
+		rf.log = log
+	}
 }
 
 //
@@ -262,7 +292,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		}
 	}*/
 
-	fmt.Printf("RequestVote,id=%d,role=%d,req=%s,rsp=%s\n", rf.me, rf.role, toJSON(args), toJSON(reply))
+	DPrintf("RequestVote,id=%d,role=%d,req=%s,rsp=%s\n", rf.me, rf.role, toJSON(args), toJSON(reply))
 }
 
 //-----------------implement AppendEntries Service--------------------
@@ -286,15 +316,15 @@ type AppendEntriesRsp struct {
 //2A: implements heartbeats only
 
 func (rf *Raft) AppendEntries(req *AppendEntriesReq, rsp *AppendEntriesRsp) {
-	//fmt.Printf("AppendEntries:role=%d,id=%d,term=%d,req=%s\n", rf.role, rf.me, rf.term, toJSON(req))
+	//DPrintf("AppendEntries:role=%d,id=%d,term=%d,req=%s\n", rf.role, rf.me, rf.term, toJSON(req))
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	//fmt.Printf("get lock\n")
+	//DPrintf("get lock\n")
 	rf.recvHeartBeat = true
 	rsp.Success = false
 	rsp.Term = rf.term
 
-	fmt.Printf("AppendEntries:role=%d,id=%d,term=%d,req=%s\n", rf.role, rf.me, rf.term, toJSON(req))
+	DPrintf("AppendEntries:role=%d,id=%d,term=%d,req=%s\n", rf.role, rf.me, rf.term, toJSON(req))
 
 	nowMs := int(time.Now().UnixNano() / 1e6)
 	if nowMs < rf.msLastAppendEntries+300 {
@@ -307,7 +337,7 @@ func (rf *Raft) AppendEntries(req *AppendEntriesReq, rsp *AppendEntriesRsp) {
 	rf.msLastAppendEntries = nowMs
 
 	if req.Term > rf.term || (req.Term == rf.term && rf.role != 2 /*is candidate*/) {
-		fmt.Printf("branch1\n")
+		DPrintf("branch1\n")
 		oldRole := rf.role
 		oldTerm := rf.term
 		rf.role = 0 //follower
@@ -319,12 +349,12 @@ func (rf *Raft) AppendEntries(req *AppendEntriesReq, rsp *AppendEntriesRsp) {
 			rf.votedFor = -1 //mean null
 		}
 	} else if req.Term < rf.term || rf.role == 2 {
-		fmt.Printf("branch2\n")
+		DPrintf("branch2\n")
 		return
 	}
 
 	logSize := len(rf.log)
-	fmt.Printf("id=%d role=%d term=%d log=%s\n", rf.me, rf.role, rf.term, toJSON(rf.log))
+	DPrintf("id=%d role=%d term=%d log=%s\n", rf.me, rf.role, rf.term, toJSON(rf.log))
 	if logSize > req.PrevLogIndex && rf.log[req.PrevLogIndex].Term == req.PrevLogTerm {
 		rf.log = append(rf.log[:req.PrevLogIndex+1], req.Entries...)
 		rsp.Success = true
@@ -335,7 +365,7 @@ func (rf *Raft) AppendEntries(req *AppendEntriesReq, rsp *AppendEntriesRsp) {
 		for logSize-1 > rf.lastCommitted && req.LeaderCommit > rf.lastCommitted {
 			rf.lastCommitted++
 			haveCommitedIncrement = true
-			fmt.Printf("id=%d role=%d log %d commited\n", rf.me, rf.role, rf.lastCommitted)
+			DPrintf("id=%d role=%d log %d commited\n", rf.me, rf.role, rf.lastCommitted)
 		}
 
 		if haveCommitedIncrement {
@@ -362,7 +392,7 @@ func (rf *Raft) AppendEntries(req *AppendEntriesReq, rsp *AppendEntriesRsp) {
 			//wait for next append entries rpc
 		}*/
 
-	fmt.Printf("AppendEntries:role=%d,id=%d,rsp=%v\n", rf.role, rf.me, toJSON(rsp))
+	DPrintf("AppendEntries:role=%d,id=%d,rsp=%v\n", rf.role, rf.me, toJSON(rsp))
 
 }
 
@@ -439,7 +469,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.condAppStartLog.Broadcast()
 	rf.mu.Unlock()
 
-	fmt.Printf("start a command.id=%d role=%d .log = %s\n", rf.me, rf.role, toJSON(logEntry))
+	DPrintf("start a command.id=%d role=%d .log = %s\n", rf.me, rf.role, toJSON(logEntry))
 
 	return logSize, term, true
 }
@@ -530,7 +560,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 func (rf *Raft) HeartbeatTimer(interval_ms int) {
 	for {
 		rf.mu.Lock()
-		//fmt.Printf("triger heart beat sender.role=%d,id=%d,term=%d\n",rf.role,rf.me,rf.term)
+		//DPrintf("triger heart beat sender.role=%d,id=%d,term=%d\n",rf.role,rf.me,rf.term)
 		if rf.role == 2 {
 			rf.condHeartBeat.Broadcast()
 		}
@@ -556,7 +586,7 @@ func (rf *Raft) HeartBeatSender(interval_ms int) {
 	for {
 
 		rf.mu.Lock()
-		//fmt.Printf("triger heart beat sender.role=%d,id=%d,term=%d\n",rf.role,rf.me,rf.term)
+		//DPrintf("triger heart beat sender.role=%d,id=%d,term=%d\n",rf.role,rf.me,rf.term)
 		if rf.role == 2 {
 			rf.BroadcastHeartBeat()
 		}
@@ -646,7 +676,7 @@ func (rf *Raft) TryToBecomeLeader() {
 
 		if !isTimeOut {
 			rf.role = 2 //leader
-			fmt.Printf("id=%d peers_num=%d become leader.", rf.me, len(rf.peers))
+			DPrintf("id=%d peers_num=%d become leader.", rf.me, len(rf.peers))
 			for serverID, _ := range rf.peers {
 				rf.mu.Lock()
 				rf.nextIndex[serverID] = len(rf.log)
@@ -691,8 +721,9 @@ func (rf *Raft) applier() {
 		//rf.lastCommitted > rf.lastApplied
 		commandIndex := rf.lastApplied + 1
 		rf.applyCh <- ApplyMsg{true, rf.log[commandIndex].Command, commandIndex}
-		fmt.Printf("id=%d role=%d log %d applied\n", rf.me, rf.role, commandIndex)
+		DPrintf("id=%d role=%d log %d applied\n", rf.me, rf.role, commandIndex)
 		rf.lastApplied++
+		rf.persist()
 		rf.mu.Unlock()
 	}
 }
@@ -726,7 +757,7 @@ func (rf *Raft) leaderCommitter(syncInfoChan chan SyncInfo) {
 			if 2*replicatedNum[syncIndex] >= len(rf.peers) && syncIndex > rf.lastCommitted {
 				rf.lastCommitted = syncIndex
 				rf.condCommitedIncre.Signal()
-				fmt.Printf("id=%d role=%d log %d commited\n", rf.me, rf.role, rf.lastCommitted)
+				DPrintf("id=%d role=%d log %d commited\n", rf.me, rf.role, rf.lastCommitted)
 			}
 		}()
 
@@ -735,7 +766,7 @@ func (rf *Raft) leaderCommitter(syncInfoChan chan SyncInfo) {
 
 //sync logs to serverID
 func (rf *Raft) syncConsumer(serverID int, syncInfoChan chan SyncInfo) {
-	fmt.Printf("start syncConsumer(%d) in %d\n", serverID, rf.me)
+	DPrintf("start syncConsumer(%d) in %d\n", serverID, rf.me)
 
 	run := make(chan bool)
 
@@ -745,7 +776,7 @@ func (rf *Raft) syncConsumer(serverID int, syncInfoChan chan SyncInfo) {
 			rf.mu.Lock()
 			oldLogLen := len(rf.log)
 			for !(oldLogLen < len(rf.log)) {
-				//fmt.Printf("syncConsumer(%d) in %d:Waiting for cv\n", serverID, rf.me)
+				//DPrintf("syncConsumer(%d) in %d:Waiting for cv\n", serverID, rf.me)
 				rf.condAppStartLog.Wait()
 			}
 			select {
@@ -774,7 +805,7 @@ func (rf *Raft) syncConsumer(serverID int, syncInfoChan chan SyncInfo) {
 		<-run
 		rf.mu.Lock()
 
-		//fmt.Printf("syncConsumer(%d) in %d:run\n", serverID, rf.me)
+		//DPrintf("syncConsumer(%d) in %d:run\n", serverID, rf.me)
 		//app add log to raft.Start to sync log to followers
 		syncIndex := len(rf.log) - 1
 		role := rf.role
@@ -799,13 +830,13 @@ func (rf *Raft) syncConsumer(serverID int, syncInfoChan chan SyncInfo) {
 				rf.condRoleChanged.Wait()
 			}
 			//rf.role != 2
-			//fmt.Printf("id=%d role=%d write to roleBecomeNotLeader\n", rf.me, rf.role)
+			//DPrintf("id=%d role=%d write to roleBecomeNotLeader\n", rf.me, rf.role)
 			select {
 			case roleBecomeNotLeader <- 0:
-				//fmt.Printf("id=%d role=%d write to roleBecomeNotLeader done\n", rf.me, rf.role)
+				//DPrintf("id=%d role=%d write to roleBecomeNotLeader done\n", rf.me, rf.role)
 
 			default:
-				//fmt.Printf("id=%d role=%d cannot write to roleBecomeNotLeader\n", rf.me, rf.role)
+				//DPrintf("id=%d role=%d cannot write to roleBecomeNotLeader\n", rf.me, rf.role)
 
 			}
 
@@ -837,7 +868,7 @@ func (rf *Raft) syncEntries2Follower(serverID int, done chan int) bool {
 		}
 		nextIndex := rf.nextIndex[serverID]
 		/*rf.mu.Lock()
-		fmt.Printf("id=%d role=%d nextIndex=%d id=%d\n", rf.me, rf.role, nextIndex, serverID)
+		DPrintf("id=%d role=%d nextIndex=%d id=%d\n", rf.me, rf.role, nextIndex, serverID)
 		rf.mu.Unlock()*/
 		prevLog := rf.log[nextIndex-1]
 		req := AppendEntriesReq{rf.me, rf.term, prevLog.LogIndex, prevLog.Term, rf.log[nextIndex:], rf.lastCommitted, "sync"}
