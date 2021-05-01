@@ -160,8 +160,6 @@ func (rf *Raft) persist() {
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
 
-	DPrintf("persist\n")
-
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	e.Encode(rf.term)
@@ -242,8 +240,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	defer rf.mu.Unlock()
 	reply.FollowerTerm = rf.term
 	reply.VoteGranted = false
-	//__STOP_AT_HERE__
-	//fix
 
 	nowMs := int(time.Now().UnixNano() / 1e6)
 	if nowMs < rf.msLastAppendEntries+300 {
@@ -256,6 +252,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.role = 0      //follower
 		rf.votedFor = -1 //mean null
 		rf.condRoleChanged.Broadcast()
+		rf.persist()
 	}
 	lastLog := rf.log[len(rf.log)-1]
 
@@ -277,20 +274,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
 		rf.recvHeartBeat = true
+		rf.persist()
 	}
-
-	/*if args.CandidateTerm == rf.term {
-		if rf.role == 0 && rf.votedFor == args.CandidateId {
-			reply.VoteGranted = true
-		} else if rf.role == 1 {
-			lastLogEntry := rf.log[len(rf.log)-1]
-			if lastLogEntry.Term > args.CandidateTerm || (lastLogEntry.Term == args.CandidateTerm && lastLogEntry.LogIndex > args.LastLogIndex) {
-				rf.role = 0 //follower
-				rf.votedFor = args.CandidateId
-				reply.VoteGranted = true
-			}
-		}
-	}*/
 
 	DPrintf("RequestVote,id=%d,role=%d,req=%s,rsp=%s\n", rf.me, rf.role, toJSON(args), toJSON(reply))
 }
@@ -316,16 +301,18 @@ type AppendEntriesRsp struct {
 //2A: implements heartbeats only
 
 func (rf *Raft) AppendEntries(req *AppendEntriesReq, rsp *AppendEntriesRsp) {
-	//DPrintf("AppendEntries:role=%d,id=%d,term=%d,req=%s\n", rf.role, rf.me, rf.term, toJSON(req))
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	//DPrintf("get lock\n")
 	rf.recvHeartBeat = true
 	rsp.Success = false
 	rsp.Term = rf.term
 
 	DPrintf("AppendEntries:role=%d,id=%d,term=%d,req=%s\n", rf.role, rf.me, rf.term, toJSON(req))
 
+	//leader would not be change in 300ms.
+	//so the another leader make AppendEntreis request is not a real leader
+	//which may be a node just recover from failed
+	//you should ignore this request
 	nowMs := int(time.Now().UnixNano() / 1e6)
 	if nowMs < rf.msLastAppendEntries+300 {
 		if req.LeaderID != rf.leaderID {
@@ -337,7 +324,6 @@ func (rf *Raft) AppendEntries(req *AppendEntriesReq, rsp *AppendEntriesRsp) {
 	rf.msLastAppendEntries = nowMs
 
 	if req.Term > rf.term || (req.Term == rf.term && rf.role != 2 /*is candidate*/) {
-		DPrintf("branch1\n")
 		oldRole := rf.role
 		oldTerm := rf.term
 		rf.role = 0 //follower
@@ -348,8 +334,8 @@ func (rf *Raft) AppendEntries(req *AppendEntriesReq, rsp *AppendEntriesRsp) {
 		if rf.term > oldTerm {
 			rf.votedFor = -1 //mean null
 		}
+		rf.persist()
 	} else if req.Term < rf.term || rf.role == 2 {
-		DPrintf("branch2\n")
 		return
 	}
 
@@ -358,6 +344,7 @@ func (rf *Raft) AppendEntries(req *AppendEntriesReq, rsp *AppendEntriesRsp) {
 	if logSize > req.PrevLogIndex && rf.log[req.PrevLogIndex].Term == req.PrevLogTerm {
 		rf.log = append(rf.log[:req.PrevLogIndex+1], req.Entries...)
 		rsp.Success = true
+		rf.persist()
 
 		//incr commit
 		logSize = len(rf.log)
@@ -373,24 +360,6 @@ func (rf *Raft) AppendEntries(req *AppendEntriesReq, rsp *AppendEntriesRsp) {
 			rf.condCommitedIncre.Signal()
 		}
 	}
-	/*
-		// old code
-		if logSize-1 == req.PrevLogIndex && rf.log[logSize-1].Term == req.PrevLogTerm {
-
-			rf.log = append(rf.log, req.Entries...)
-			rsp.Success = true
-
-		} else {
-
-			if logSize-1 > req.PrevLogIndex && rf.lastCommitted < req.PrevLogIndex {
-				rf.log = rf.log[:req.PrevLogIndex+1]
-				rf.log = append(rf.log, req.Entries...)
-				rsp.Success = true
-			}
-
-			//leader's log entries cannot append to follower's log
-			//wait for next append entries rpc
-		}*/
 
 	DPrintf("AppendEntries:role=%d,id=%d,rsp=%v\n", rf.role, rf.me, toJSON(rsp))
 
@@ -538,7 +507,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	for serverID, _ = range rf.peers {
 		rf.nextIndex[serverID] = 1
 	}
-	//go rf.HeartBeatSender(100)
+
+	// initialize from state persisted before a crash
+	rf.readPersist(persister.ReadRaftState())
+
 	go rf.HeartbeatTimer(100)
 	go rf.ElectionTimer()
 
@@ -550,9 +522,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	go rf.leaderCommitter(syncInfoChan)
 	go rf.applier()
-
-	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
 
 	return rf
 }
@@ -618,6 +587,7 @@ func (rf *Raft) ElectionTimer() {
 			rf.role = 1 //candidate
 			rf.term++
 			rf.votedFor = -1
+			rf.persist()
 			go rf.TryToBecomeLeader()
 		}
 		rf.recvHeartBeat = false
@@ -688,6 +658,7 @@ func (rf *Raft) TryToBecomeLeader() {
 		} else {
 			rf.term++
 			rf.votedFor = rf.me
+			rf.persist()
 		}
 
 		mutex.Unlock()
@@ -805,7 +776,6 @@ func (rf *Raft) syncConsumer(serverID int, syncInfoChan chan SyncInfo) {
 		<-run
 		rf.mu.Lock()
 
-		//DPrintf("syncConsumer(%d) in %d:run\n", serverID, rf.me)
 		//app add log to raft.Start to sync log to followers
 		syncIndex := len(rf.log) - 1
 		role := rf.role
@@ -867,9 +837,6 @@ func (rf *Raft) syncEntries2Follower(serverID int, done chan int) bool {
 		default:
 		}
 		nextIndex := rf.nextIndex[serverID]
-		/*rf.mu.Lock()
-		DPrintf("id=%d role=%d nextIndex=%d id=%d\n", rf.me, rf.role, nextIndex, serverID)
-		rf.mu.Unlock()*/
 		prevLog := rf.log[nextIndex-1]
 		req := AppendEntriesReq{rf.me, rf.term, prevLog.LogIndex, prevLog.Term, rf.log[nextIndex:], rf.lastCommitted, "sync"}
 		rsp := AppendEntriesRsp{}
@@ -881,6 +848,7 @@ func (rf *Raft) syncEntries2Follower(serverID int, done chan int) bool {
 		if rsp.Term > rf.term {
 			rf.term = rsp.Term
 			rf.role = 0
+			rf.persist()
 			rf.condRoleChanged.Broadcast()
 			rf.mu.Unlock()
 			return false
