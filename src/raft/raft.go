@@ -860,12 +860,19 @@ func (rf *Raft) syncEntries2Follower(serverID int, done chan int) bool {
 			rf.mu.Unlock()
 			return true
 		} else {
-			if rf.nextIndex[serverID] > 1 {
-				rf.nextIndex[serverID]--
-				continue
-			} else {
-				return false
+			var i = len(rf.log) - 1
+			for ; i >= 0; i-- {
+				if rf.log[i].Term < prevLog.Term {
+					break
+				}
 			}
+
+			if i > 0 {
+				rf.nextIndex[serverID] = i
+			} else {
+				rf.nextIndex[serverID] = 1
+			}
+
 		}
 	}
 }
