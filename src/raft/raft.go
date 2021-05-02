@@ -294,8 +294,9 @@ type AppendEntriesReq struct {
 }
 
 type AppendEntriesRsp struct {
-	Term    int
-	Success bool
+	Term        int
+	Success     bool
+	SmallerTerm int
 }
 
 //2A: implements heartbeats only
@@ -306,6 +307,7 @@ func (rf *Raft) AppendEntries(req *AppendEntriesReq, rsp *AppendEntriesRsp) {
 	rf.recvHeartBeat = true
 	rsp.Success = false
 	rsp.Term = rf.term
+	rsp.SmallerTerm = -1
 
 	DPrintf("AppendEntries:role=%d,id=%d,term=%d,req=%s\n", rf.role, rf.me, rf.term, toJSON(req))
 
@@ -358,6 +360,15 @@ func (rf *Raft) AppendEntries(req *AppendEntriesReq, rsp *AppendEntriesRsp) {
 		if haveCommitedIncrement {
 			//notify applyer to apply command to application
 			rf.condCommitedIncre.Signal()
+		}
+	} else {
+		//TODO: 返回第一个比req.PrevLogTerm小的Term
+		var i int
+		for i = len(rf.log) - 1; i >= 0; i-- {
+			if rf.log[i].Term < req.PrevLogTerm {
+				rsp.SmallerTerm = rf.log[i].Term
+				break
+			}
 		}
 	}
 
@@ -860,9 +871,21 @@ func (rf *Raft) syncEntries2Follower(serverID int, done chan int) bool {
 			rf.mu.Unlock()
 			return true
 		} else {
+
+			var minTerm int
+			if rsp.SmallerTerm != -1 {
+				if rsp.SmallerTerm > prevLog.Term {
+					minTerm = prevLog.Term
+				} else {
+					minTerm = rsp.SmallerTerm
+				}
+			} else {
+				minTerm = req.PrevLogTerm
+			}
+
 			var i = len(rf.log) - 1
 			for ; i >= 0; i-- {
-				if rf.log[i].Term < prevLog.Term {
+				if rf.log[i].Term < minTerm {
 					break
 				}
 			}
@@ -872,7 +895,6 @@ func (rf *Raft) syncEntries2Follower(serverID int, done chan int) bool {
 			} else {
 				rf.nextIndex[serverID] = 1
 			}
-
 		}
 	}
 }
