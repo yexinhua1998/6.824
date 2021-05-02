@@ -845,6 +845,7 @@ func (rf *Raft) syncConsumer(serverID int, syncInfoChan chan SyncInfo) {
 }
 
 func (rf *Raft) syncEntries2Follower(serverID int, done chan int) bool {
+	syncRetry := 3
 	for {
 		select {
 		case <-done:
@@ -876,28 +877,33 @@ func (rf *Raft) syncEntries2Follower(serverID int, done chan int) bool {
 			rf.mu.Unlock()
 			return true
 		} else {
-
-			var minTerm int
-			if rsp.SmallerTerm != -1 {
-				if rsp.SmallerTerm > prevLog.Term {
-					minTerm = prevLog.Term
+			if syncRetry > 0 {
+				syncRetry--
+				var minTerm int
+				if rsp.SmallerTerm != -1 {
+					if rsp.SmallerTerm > prevLog.Term {
+						minTerm = prevLog.Term
+					} else {
+						minTerm = rsp.SmallerTerm
+					}
 				} else {
-					minTerm = rsp.SmallerTerm
+					minTerm = req.PrevLogTerm
+				}
+
+				var i = len(rf.log) - 1
+				for ; i >= 0; i-- {
+					if rf.log[i].Term < minTerm {
+						break
+					}
+				}
+
+				if i > 0 {
+					rf.nextIndex[serverID] = i
+				} else {
+					rf.nextIndex[serverID] = 1
 				}
 			} else {
-				minTerm = req.PrevLogTerm
-			}
-
-			var i = len(rf.log) - 1
-			for ; i >= 0; i-- {
-				if rf.log[i].Term < minTerm {
-					break
-				}
-			}
-
-			if i > 0 {
-				rf.nextIndex[serverID] = i
-			} else {
+				//sync all of the leader log to follower
 				rf.nextIndex[serverID] = 1
 			}
 		}
