@@ -705,7 +705,6 @@ func (rf *Raft) applier() {
 		rf.applyCh <- ApplyMsg{true, rf.log[commandIndex].Command, commandIndex}
 		DPrintf("id=%d role=%d log %d applied\n", rf.me, rf.role, commandIndex)
 		rf.lastApplied++
-		rf.persist()
 		rf.mu.Unlock()
 	}
 }
@@ -835,6 +834,11 @@ func (rf *Raft) syncConsumer(serverID int, syncInfoChan chan SyncInfo) {
 		case success := <-synced:
 			if success {
 				syncInfoChan <- SyncInfo{serverID, syncIndex}
+			} else {
+				go func() {
+					time.Sleep(time.Millisecond * 10)
+					run <- true
+				}()
 			}
 		}
 	}
@@ -853,6 +857,7 @@ func (rf *Raft) syncEntries2Follower(serverID int, done chan int) bool {
 		rsp := AppendEntriesRsp{}
 		ok := rf.sendAppendEntries(serverID, &req, &rsp)
 		if !ok {
+			DPrintf("rpc AppendEntries Failed %d -> %d", rf.me, serverID)
 			return false
 		}
 		rf.mu.Lock()
