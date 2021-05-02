@@ -702,8 +702,10 @@ func (rf *Raft) applier() {
 		}
 		//rf.lastCommitted > rf.lastApplied
 		commandIndex := rf.lastApplied + 1
+		rf.mu.Unlock()
 		rf.applyCh <- ApplyMsg{true, rf.log[commandIndex].Command, commandIndex}
 		DPrintf("id=%d role=%d log %d applied\n", rf.me, rf.role, commandIndex)
+		rf.mu.Lock()
 		rf.lastApplied++
 		rf.mu.Unlock()
 	}
@@ -852,10 +854,12 @@ func (rf *Raft) syncEntries2Follower(serverID int, done chan int) bool {
 			return false
 		default:
 		}
+		rf.mu.Lock()
 		nextIndex := rf.nextIndex[serverID]
 		prevLog := rf.log[nextIndex-1]
 		req := AppendEntriesReq{rf.me, rf.term, prevLog.LogIndex, prevLog.Term, rf.log[nextIndex:], rf.lastCommitted, "sync"}
 		rsp := AppendEntriesRsp{}
+		rf.mu.Unlock()
 		ok := rf.sendAppendEntries(serverID, &req, &rsp)
 		if !ok {
 			DPrintf("rpc AppendEntries Failed %d -> %d", rf.me, serverID)
