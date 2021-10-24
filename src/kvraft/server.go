@@ -1,12 +1,14 @@
 package kvraft
 
 import (
-	"../labgob"
-	"../labrpc"
+	"fmt"
 	"log"
-	"../raft"
 	"sync"
 	"sync/atomic"
+
+	"../labgob"
+	"../labrpc"
+	"../raft"
 )
 
 const Debug = 0
@@ -18,11 +20,13 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
-
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	OpType string
+	Key    string
+	Value  string
 }
 
 type KVServer struct {
@@ -35,15 +39,46 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	storage *KvStorage
+	applier *Applier
 }
-
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	//判断自己是否为leader
+	//如果是，从自己维护的kv状态中读取信息
+	_, isleader := kv.rf.GetState()
+	if !isleader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+	value := kv.storage.Get(args.Key)
+	//TODO: debug为什么rpc拿到的req是空的？
+	fmt.Printf("server: get. me=%d req=%+v key=%s value=%s\n", kv.me, args, args.Key, value)
+	reply.Value = value
+	reply.Err = OK
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	//将对应的command rf.Start()进去。如果返回不是leader，则将结果返回给client
+	//开启一个backgroud goroutine，监听rf.applyCh，并自己维护kv状态
+	op := Op{
+		OpType: args.Op,
+		Key:    args.Key,
+		Value:  args.Value,
+	}
+	fmt.Printf("server: putappend. key=%s value=%s\n", args.Key, args.Value)
+	index, _, isleader := kv.rf.Start(op)
+	if !isleader {
+		reply.Err = ErrWrongLeader
+	} else {
+		//等待applier通知
+		fmt.Printf("waiting for index...\n")
+		kv.applier.WaitForIndex(index)
+		fmt.Printf("wait done.\n")
+		reply.Err = OK
+	}
 }
 
 //
@@ -96,6 +131,17 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
+	kv.storage = NewKvStorage()
+
+	//applier := &Applier{
+	//	me:      me,
+	//	ApplyCh: kv.applyCh,
+	//	Storage: kv.storage,
+	//}
+	applier := NewApplier(me, kv.applyCh, kv.storage)
+	kv.applier = applier
+
+	go applier.Start()
 
 	return kv
 }
