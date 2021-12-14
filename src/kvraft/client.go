@@ -77,6 +77,10 @@ func (ck *Clerk) Get(key string) string {
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	//对Leader执行PUT操作
 
+	//因为请求有可能是单向的，即：我发出了请求，我以为你没收到，但事实上你收到了
+	//假如你发出了一个请求，你以为你没发送成功，事实上服务端是收到了，并且写进去，然后你重试了，那这个数据就会写两份
+	//所以，这里需要确保接口幂等性
+
 	// You will have to modify this function.
 	req := &PutAppendArgs{
 		Key:   key,
@@ -88,7 +92,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		for i, svr := range ck.servers {
 			ok := svr.Call("KVServer.PutAppend", req, rsp)
 			if !ok {
-				fmt.Printf("call put append not ok")
+				fmt.Printf("call put append not ok\n")
 				continue
 			}
 			fmt.Printf("client: putappend i=%d op=%s key=%s req=%+v\n", i, op, key, req)
