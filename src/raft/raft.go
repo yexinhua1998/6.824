@@ -145,6 +145,12 @@ func (rf *Raft) GetState() (int, bool) {
 	return term, isleader
 }
 
+type RfData struct {
+	Term     int
+	VotedFor int
+	Log      []LogEntry
+}
+
 //
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
@@ -162,11 +168,16 @@ func (rf *Raft) persist() {
 
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
-	e.Encode(rf.term)
-	e.Encode(rf.votedFor)
-	e.Encode(rf.log)
+	rfData := &RfData{
+		Term:     rf.term,
+		VotedFor: rf.votedFor,
+		Log:      rf.log,
+	}
+	err := e.Encode(rfData)
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
+
+	DPrintf("id=%d err=%v rfData=%v saved=%x", rf.me, err, rfData, data)
 }
 
 //
@@ -190,21 +201,19 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.yyy = yyy
 	// }
 
-	DPrintf("readPersist\n")
+	DPrintf("readPersist. id=%d data=%x\n", rf.me, data)
 
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
-	var term int
-	var votedFor int
-	var log []LogEntry
-	if d.Decode(&term) != nil ||
-		d.Decode(&votedFor) != nil ||
-		d.Decode(&log) != nil {
-		// error...
+	rfData := &RfData{}
+	err := d.Decode(rfData)
+	if err != nil {
+		DPrintf("gob decode with err = %v", err)
 	} else {
-		rf.term = term
-		rf.votedFor = votedFor
-		rf.log = log
+		rf.term = rfData.Term
+		rf.votedFor = rfData.VotedFor
+		rf.log = rfData.Log
+		DPrintf("read persists end. id=%d rfData=%v term=%d votedfor=%d log=%v", rf.me, rfData, rf.term, rf.votedFor, rf.log)
 	}
 }
 
@@ -446,6 +455,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	logSize := len(rf.log)
 	logEntry := LogEntry{rf.term, logSize, command}
 	rf.log = append(rf.log, logEntry)
+	rf.persist()
 	rf.condAppStartLog.Broadcast()
 	rf.mu.Unlock()
 
@@ -522,6 +532,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
+	//这个timer通过定时触发heartbeat，wake up syncconsumer，让log最迟在100ms落盘
+	//避免了log append成功了，但一直没有commit
 	go rf.HeartbeatTimer(100)
 	go rf.ElectionTimer()
 
@@ -764,6 +776,7 @@ func (rf *Raft) syncConsumer(serverID int, syncInfoChan chan SyncInfo) {
 			}
 			select {
 			case run <- true:
+				//fmt.Printf("raft: wake sync consumer because start.\n")
 			default:
 			}
 			rf.mu.Unlock()
@@ -778,6 +791,20 @@ func (rf *Raft) syncConsumer(serverID int, syncInfoChan chan SyncInfo) {
 			rf.mu.Unlock()
 			select {
 			case run <- true:
+				//fmt.Printf("raft: wake sync consumer because heartbeat received.\n")
+			default:
+			}
+		}
+	}()
+
+	roleChangeChan := make(chan interface{})
+	go func() {
+		for {
+			rf.mu.Lock()
+			rf.condRoleChanged.Wait()
+			rf.mu.Unlock()
+			select {
+			case roleChangeChan <- nil:
 			default:
 			}
 		}
@@ -799,29 +826,26 @@ func (rf *Raft) syncConsumer(serverID int, syncInfoChan chan SyncInfo) {
 		var done = make(chan int)
 
 		//listen for role become not leader
+		//并通知到roleBecomeNotLeader
 		roleBecomeNotLeader := make(chan int)
 		go func() {
-			rf.mu.Lock()
-			defer rf.mu.Unlock()
-			for rf.role == 2 {
+			for {
 				select {
 				case <-done:
 					return
-				default:
+				case <-roleChangeChan:
+					rf.mu.Lock()
+					roleNow := rf.role
+					rf.mu.Unlock()
+
+					if roleNow != RoleLeader {
+						select {
+						case roleBecomeNotLeader <- 0:
+						default:
+						}
+					}
 				}
-				rf.condRoleChanged.Wait()
 			}
-			//rf.role != 2
-			//DPrintf("id=%d role=%d write to roleBecomeNotLeader\n", rf.me, rf.role)
-			select {
-			case roleBecomeNotLeader <- 0:
-				//DPrintf("id=%d role=%d write to roleBecomeNotLeader done\n", rf.me, rf.role)
-
-			default:
-				//DPrintf("id=%d role=%d cannot write to roleBecomeNotLeader\n", rf.me, rf.role)
-
-			}
-
 		}()
 
 		synced := make(chan bool)
@@ -912,4 +936,9 @@ func (rf *Raft) syncEntries2Follower(serverID int, done chan int) bool {
 			}
 		}
 	}
+}
+
+//call by application layer
+func (rf *Raft) LogSize() int {
+	return len(rf.log)
 }

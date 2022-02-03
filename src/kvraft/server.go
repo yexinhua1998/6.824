@@ -63,6 +63,25 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
 	//将对应的command rf.Start()进去。如果返回不是leader，则将结果返回给client
 	//开启一个backgroud goroutine，监听rf.applyCh，并自己维护kv状态
+
+	//无论成功还是失败，都要返回真实的log最后的index
+	defer func() {
+		reply.Index = kv.rf.LogSize() - 1
+	}()
+
+	//要先检查是否是leader，不是leader直接返回
+	_, isleader := kv.rf.GetState()
+	if !isleader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+
+	//如果请求的Index不等于当前raft log最后的entry的index，则说明这个请求可能是重复的，需要抛弃
+	if args.Index != kv.rf.LogSize()-1 {
+		reply.Err = ErrInvalidIndex
+		return
+	}
+
 	op := Op{
 		OpType: args.Op,
 		Key:    args.Key,
