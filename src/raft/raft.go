@@ -113,6 +113,9 @@ type Raft struct {
 
 	msLastAppendEntries int
 	leaderID            int
+
+	//用于通知进程已经被killed了
+	deadChan chan interface{}
 }
 
 //struct represent of a log entry
@@ -478,6 +481,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
+
+	close(rf.deadChan)
 }
 
 func (rf *Raft) killed() bool {
@@ -523,6 +528,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.condHeartBeat = sync.NewCond(&rf.mu)
 
 	syncInfoChan := make(chan SyncInfo)
+
+	rf.deadChan = make(chan interface{})
 
 	var serverID int
 	for serverID, _ = range rf.peers {
@@ -833,6 +840,8 @@ func (rf *Raft) syncConsumer(serverID int, syncInfoChan chan SyncInfo) {
 				select {
 				case <-done:
 					return
+				case <-rf.deadChan:
+					return
 				case <-roleChangeChan:
 					rf.mu.Lock()
 					roleNow := rf.role
@@ -857,6 +866,8 @@ func (rf *Raft) syncConsumer(serverID int, syncInfoChan chan SyncInfo) {
 		select {
 		case <-roleBecomeNotLeader:
 			close(done)
+		case <-rf.deadChan:
+			return
 		case success := <-synced:
 			if success {
 				syncInfoChan <- SyncInfo{serverID, syncIndex}

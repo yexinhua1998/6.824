@@ -5,6 +5,10 @@ import (
 	"sync"
 )
 
+func init() {
+	log.SetFlags(log.Ltime | log.Lshortfile)
+}
+
 // Debugging
 const Debug = 1
 
